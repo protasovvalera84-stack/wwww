@@ -143,22 +143,50 @@ export async function loadMediaForChat(chatId: string): Promise<Map<string, stri
 }
 
 /** Get the platform-appropriate download/save directory hint. */
-export function getStorageInfo(): { platform: string; savePath: string } {
+/**
+ * Get the platform-appropriate PRIVATE storage path hint.
+ *
+ * WhatsApp model: media stored in app-private directories, NOT in public
+ * Downloads / Documents folders. Other apps cannot access private storage.
+ * In the browser context all media lives in IndexedDB (sandboxed per-origin).
+ */
+export function getStorageInfo(): { platform: string; savePath: string; isPrivate: boolean } {
   const ua = navigator.userAgent.toLowerCase();
+  const isNativeApp = !!(window as Record<string, unknown>).nexalink;
 
   if (ua.includes("android")) {
-    return { platform: "Android", savePath: "Downloads/NexaLink/" };
+    return {
+      platform: "Android",
+      savePath: isNativeApp
+        ? "app-private: /data/data/io.nexalink.app/files/media/"
+        : "IndexedDB (sandboxed)",
+      isPrivate: true,
+    };
   }
   if (ua.includes("win")) {
-    return { platform: "Windows", savePath: "Documents\\NexaLink\\" };
+    return {
+      platform: "Windows",
+      savePath: isNativeApp ? `%LOCALAPPDATA%\\NexaLink\\media\\` : "IndexedDB (sandboxed)",
+      isPrivate: true,
+    };
   }
   if (ua.includes("linux")) {
-    return { platform: "Linux", savePath: "~/NexaLink/" };
+    return {
+      platform: "Linux",
+      savePath: isNativeApp ? "~/.local/share/nexalink/media/" : "IndexedDB (sandboxed)",
+      isPrivate: true,
+    };
   }
   if (ua.includes("mac")) {
-    return { platform: "macOS", savePath: "~/Documents/NexaLink/" };
+    return {
+      platform: "macOS",
+      savePath: isNativeApp
+        ? "~/Library/Application Support/NexaLink/media/"
+        : "IndexedDB (sandboxed)",
+      isPrivate: true,
+    };
   }
-  return { platform: "Unknown", savePath: "NexaLink/" };
+  return { platform: "Browser", savePath: "IndexedDB (sandboxed)", isPrivate: true };
 }
 
 /** Trigger a browser download of a media attachment. */

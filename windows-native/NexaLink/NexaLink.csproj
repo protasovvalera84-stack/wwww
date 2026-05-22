@@ -14,7 +14,10 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2651.64" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- SQLCipher-backed SQLite: AES-256-CBC encrypted database (WhatsApp model) -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.8" />
+    <!-- DPAPI: Windows Data Protection API for storing the DB key -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 </Project>

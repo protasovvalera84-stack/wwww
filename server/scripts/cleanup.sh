@@ -48,8 +48,9 @@ log "Purging messages older than 1 day via Synapse Admin API..."
 SYNAPSE_ADMIN_TOKEN="${SYNAPSE_ADMIN_TOKEN:-}"
 SYNAPSE_URL="http://localhost:8008"
 
-# Determine the cutoff timestamp (1 day ago, in milliseconds)
-CUTOFF_MS=$(( ($(date +%s) - 86400) * 1000 ))
+# Determine the cutoff timestamp (6 hours ago, in milliseconds)
+# WhatsApp model: messages deleted after 6h (hard cap on server)
+CUTOFF_MS=$(( ($(date +%s) - 21600) * 1000 ))
 
 if [ -n "$SYNAPSE_ADMIN_TOKEN" ]; then
     # Get all known rooms and purge old events
@@ -83,7 +84,8 @@ fi
 # =============================================================================
 log "Purging server media older than 30 days..."
 
-THIRTY_DAYS_AGO_MS=$(( ($(date +%s) - 2592000) * 1000 ))
+# Media deleted after 24h (WhatsApp model — hard cap)
+THIRTY_DAYS_AGO_MS=$(( ($(date +%s) - 86400) * 1000 ))
 
 if [ -n "$SYNAPSE_ADMIN_TOKEN" ]; then
     RESULT=$(curl -sf -X POST \

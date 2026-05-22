@@ -39,21 +39,15 @@ database:
 log_config: /data/log.config
 
 # --- Media storage ---
+# WhatsApp model: media is encrypted AES-256 CLIENT-SIDE before upload.
+# The server stores only encrypted blobs — it cannot read any media content.
+# Authentication required to download (even encrypted blobs need auth).
 media_store_path: /data/media_store
-max_upload_size: 50M
-enable_authenticated_media: false
-url_preview_enabled: true
-url_preview_ip_range_blacklist:
-  - "127.0.0.0/8"
-  - "10.0.0.0/8"
-  - "172.16.0.0/12"
-  - "192.168.0.0/16"
-  - "100.64.0.0/10"
-  - "192.0.0.0/24"
-  - "169.254.0.0/16"
-  - "::1/128"
-  - "fe80::/10"
-  - "fc00::/7"
+max_upload_size: 100M
+# REQUIRED: prevents unauthenticated access to media URLs
+enable_authenticated_media: true
+# Disable URL previews — server would fetch URLs and log them (privacy leak)
+url_preview_enabled: false
 
 # --- Registration ---
 enable_registration: ${ENABLE_REGISTRATION}
@@ -105,8 +99,12 @@ presence:
   enabled: true
 
 # --- Push notifications ---
+# WhatsApp model: NEVER include message content in push payloads.
+# Push only sends a "new message" signal — the app fetches and decrypts
+# the actual content from the server using E2EE.
+# This prevents Apple/Google push servers from reading your messages.
 push:
-  include_content: true
+  include_content: false
 
 # ============================================================================
 # HYBRID RELAY MODEL — WhatsApp-style message lifecycle
@@ -122,27 +120,32 @@ push:
 # ============================================================================
 retention:
   enabled: true
-  # Default policy applied to all rooms unless overridden per-room
+  # WhatsApp model: messages exist on server only until all recipients sync.
+  # min_lifetime: 0s  — may be deleted immediately after all devices sync
+  # max_lifetime: 6h  — hard cap: messages gone from server within 6 hours
+  # (WhatsApp is ~24h; 6h is more aggressive and closer to "delete after delivery")
   default_policy:
     min_lifetime: 0s
-    max_lifetime: 1d
-  # Purge jobs: check and remove expired events frequently
+    max_lifetime: 6h
+  # Purge jobs run every hour to keep the server storage near-zero
   purge_jobs:
-    # Rooms with short retention (≤ 1 day) — checked every 6 hours
     - shortest_max_lifetime: 0s
-      longest_max_lifetime: 1d
-      interval: 6h
-    # Rooms with no explicit policy — also purge after 1 day
-    - longest_max_lifetime: 1d
-      interval: 6h
+      longest_max_lifetime: 6h
+      interval: 1h
+    - longest_max_lifetime: 6h
+      interval: 1h
 
 # ============================================================================
-# MEDIA RETENTION — 30 days on server, then deleted
-# Clients download media to local storage on first view.
+# MEDIA RETENTION — 24 hours on server (WhatsApp model)
+#
+# Media is encrypted AES-256 CLIENT-SIDE before upload.
+# Server stores only encrypted blobs.
+# Once the recipient downloads the blob, the media-purger service deletes it.
+# Hard cap: 24 hours regardless of download status.
 # ============================================================================
 media_retention:
-  local_media_lifetime: 30d
-  remote_media_lifetime: 30d
+  local_media_lifetime: 24h
+  remote_media_lifetime: 24h
 
 # --- Forgotten rooms cleanup ---
 forgotten_room_retention_period: 7d

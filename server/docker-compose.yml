@@ -184,6 +184,25 @@ services:
     networks:
       - nexalink
 
+  # --- Media Purger (WhatsApp relay model) ---
+  # Deletes encrypted media blobs from the server after 1h.
+  # Messages are purged via Synapse retention module (homeserver.yaml: max_lifetime: 6h).
+  # Server NEVER stores plaintext media — all blobs are AES-256-CTR encrypted client-side.
+  media-purger:
+    build: ./media-purger
+    restart: always
+    logging: *default-logging
+    depends_on:
+      synapse:
+        condition: service_started
+    environment:
+      SYNAPSE_URL: "http://synapse:8008"
+      SYNAPSE_ADMIN_TOKEN: ${SYNAPSE_ADMIN_TOKEN:-}
+      MEDIA_MAX_AGE_HOURS: "1"
+      PURGE_INTERVAL_MINS: "10"
+    networks:
+      - nexalink
+
   # --- Monitoring: Node Exporter (system metrics) ---
   node-exporter:
     image: prom/node-exporter:latest

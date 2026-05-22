@@ -1157,10 +1157,10 @@ fi
 # =============================================================================
 CLEANUP_SCRIPT="$SERVER_DIR/scripts/cleanup.sh"
 chmod +x "$CLEANUP_SCRIPT"
-CRON_LINE="0 */6 * * * $CLEANUP_SCRIPT >> /var/log/nexalink-cleanup.log 2>&1"
+CRON_LINE="0 * * * * $CLEANUP_SCRIPT >> /var/log/nexalink-cleanup.log 2>&1"
 if ! crontab -l 2>/dev/null | grep -q "nexalink-cleanup\|nexalink/server/scripts/cleanup"; then
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
-    log "Relay cleanup cron job installed (every 6 hours)."
+    log "Relay cleanup cron job installed (every hour — WhatsApp model)."
 else
     log "Cleanup cron job already exists."
 fi

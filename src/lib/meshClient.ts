@@ -328,27 +328,36 @@ export async function checkServer(): Promise<boolean> {
   }
 }
 
-/** Upload a file to the server. Returns the mxc:// URI. */
+/**
+ * Upload a file to the server — ENCRYPTED (WhatsApp model).
+ *
+ * The file is encrypted AES-256-CTR client-side before upload.
+ * Returns an EncryptedFileInfo object containing the mxc:// URI plus
+ * the key/IV needed for decryption.  Embed this as `file` in your
+ * Matrix message body (the E2EE session protects the key).
+ *
+ * The server NEVER receives plaintext media.
+ */
 export async function uploadMedia(
   accessToken: string,
   file: File,
+): Promise<import("./mediaEncryption").EncryptedFileInfo> {
+  const { uploadEncryptedMedia } = await import("./mediaEncryption");
+  return uploadEncryptedMedia(getServerUrl(), accessToken, file);
+}
+
+/**
+ * Download and decrypt media from the server.
+ *
+ * @param fileInfo  The EncryptedFileInfo from the Matrix message body
+ * @returns A temporary object URL for the decrypted media
+ */
+export async function downloadMedia(
+  accessToken: string,
+  fileInfo: import("./mediaEncryption").EncryptedFileInfo,
 ): Promise<string> {
-  const resp = await fetch(`${getServerUrl()}/_matrix/media/v3/upload?filename=${encodeURIComponent(file.name)}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": file.type || "application/octet-stream",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: file,
-  });
-
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error((err as { error?: string }).error || `Upload failed (${resp.status})`);
-  }
-
-  const data = await resp.json();
-  return (data as { content_uri: string }).content_uri;
+  const { downloadDecryptedMedia } = await import("./mediaEncryption");
+  return downloadDecryptedMedia(getServerUrl(), accessToken, fileInfo);
 }
 
 /** Convert an mxc:// URI to an HTTP URL for display. */

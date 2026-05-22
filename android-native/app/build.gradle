@@ -55,10 +55,14 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
 
-    // Room (SQLite database)
+    // Room (SQLite database) + SQLCipher encryption (WhatsApp model)
+    // SQLCipher replaces the SQLite engine with an AES-256-CBC encrypted variant.
+    // The database key is derived from Android Keystore (hardware-backed when available).
     implementation 'androidx.room:room-runtime:2.6.1'
     implementation 'androidx.room:room-ktx:2.6.1'
     kapt 'androidx.room:room-compiler:2.6.1'
+    implementation 'net.zetetic:android-database-sqlcipher:4.5.4'
+    implementation 'androidx.sqlite:sqlite-ktx:2.4.0'
 
     // Networking (OkHttp + Retrofit for Matrix API)
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'

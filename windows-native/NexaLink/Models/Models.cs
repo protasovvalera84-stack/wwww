@@ -30,6 +30,12 @@ namespace NexaLink.Models
         public string MsgType { get; set; } = "m.text";
         public long Timestamp { get; set; }
         public string? MediaUrl { get; set; }
+        /// <summary>
+        /// Absolute path to the media file in app-private storage.
+        /// Format: %LOCALAPPDATA%\NexaLink\media\&lt;roomId&gt;\&lt;filename&gt;
+        /// This is NEVER in Downloads or any shared location.
+        /// </summary>
+        public string? LocalPath { get; set; }
 
         public string SenderName => Sender.Split(':')[0].TrimStart('@');
         public string TimeDisplay => DateTimeOffset.FromUnixTimeMilliseconds(Timestamp).LocalDateTime.ToString("HH:mm");

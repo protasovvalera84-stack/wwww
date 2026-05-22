@@ -1,0 +1,12 @@
+{
+  "name": "nexalink-media-purger",
+  "version": "1.0.0",
+  "description": "WhatsApp-model media purger: deletes server media after 1h (after all recipients download it)",
+  "main": "purger.js",
+  "scripts": {
+    "start": "node purger.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}

@@ -1,9 +1,8 @@
 /**
- * SQLite local database — rooms, messages, media cache.
+ * NexaLink Local Database — SQLCipher encrypted rooms, messages, media cache.
  */
 #ifndef DATABASE_H
 #define DATABASE_H
-#include <sqlite3.h>
 #include <glib.h>
 
 typedef struct _NexaLinkDB NexaLinkDB;
@@ -15,7 +14,15 @@ typedef struct {
 } DBRoom;
 
 typedef struct {
-    char *event_id, *room_id, *sender, *body, *msgtype, *media_url;
+    char *event_id, *room_id, *sender, *body, *msgtype;
+    char *media_url;
+    /**
+     * Absolute path to the decrypted media file in app-private storage.
+     * Format: ~/.local/share/nexalink/media/<roomId>/<filename>
+     * This directory has chmod 0700 — not accessible to other users.
+     * NEVER points to ~/Downloads or any shared location.
+     */
+    char *local_media_path;
     gint64 timestamp;
 } DBMessage;
 

@@ -15,7 +15,21 @@ if not webkit_dep.found()
 endif
 soup_dep = dependency('libsoup-3.0')
 json_dep = dependency('json-glib-1.0')
-sqlite_dep = dependency('sqlite3')
+
+# SQLCipher (AES-256-CBC encrypted SQLite) — WhatsApp model
+# Install on Ubuntu/Debian: apt-get install libsqlcipher-dev
+# Falls back to plain sqlite3 if sqlcipher is not available (dev only)
+sqlcipher_dep = dependency('sqlcipher', required: false)
+if sqlcipher_dep.found()
+  sqlite_dep = sqlcipher_dep
+  add_project_arguments('-DHAVE_SQLCIPHER=1', language: 'c')
+  message('Using SQLCipher for encrypted database')
+else
+  sqlite_dep = dependency('sqlite3')
+  warning('SQLCipher not found — falling back to unencrypted SQLite (DEV ONLY, not for production)')
+endif
+
+# libsecret (GNOME Keyring) — stores DB key securely
 secret_dep = dependency('libsecret-1')
 ssl_dep = dependency('openssl')
 
@@ -29,6 +43,7 @@ src = files(
   'src/network/room_operations.c',
   'src/data/database.c',
   'src/data/secure_storage.c',
+  'src/data/media_storage.c',
   'src/ui/webview_window.c',
   'src/ui/login_window.c',
   'src/ui/main_window.c',
