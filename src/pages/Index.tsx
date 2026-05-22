@@ -1,0 +1,632 @@
+import { useState, useCallback, useMemo, useEffect } from "react";
+import { ChatSidebar, type SearchResult } from "@/components/ChatSidebar";
+import { ChatView } from "@/components/ChatView";
+import { EmptyChat } from "@/components/EmptyChat";
+import { AccountSettings } from "@/components/AccountSettings";
+import { CallScreen, IncomingCallBanner, CallType } from "@/components/CallScreen";
+import { toast } from "sonner";
+import { GroupSettingsDialog } from "@/components/GroupSettingsDialog";
+import { DmSettingsDialog } from "@/components/DmSettingsDialog";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
+import { PwaInstallBanner } from "@/components/PwaInstallBanner";
+import {
+  contacts as defaultContacts, defaultProfile,
+  Chat, Message, MediaAttachment, Story, StoryItem, UserProfile, Topic, ChatFolder,
+} from "@/data/mockData";
+import { useMesh } from "@/lib/MeshProvider";
+import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
+import { CallEvent } from "matrix-js-sdk/lib/webrtc/call";
+import { CallEventHandlerEvent } from "matrix-js-sdk/lib/webrtc/callEventHandler";
+import { getUserDisplayName } from "@/lib/meshClient";
+
+interface IndexProps {
+  initialProfile?: UserProfile;
+  onProfileChange?: (p: UserProfile) => void;
+  onLogout?: () => void;
+}
+
+const Index = ({ initialProfile, onProfileChange, onLogout }: IndexProps = {}) => {
+  const mesh = useMesh();
+
+  const [stories, setStories] = useState<Story[]>([]);
+
+  // Update tab title with unread count
+  useEffect(() => {
+    const totalUnread = mesh.rooms.reduce((sum, r) => sum + (r.unread || 0), 0);
+    document.title = totalUnread > 0 ? `(${totalUnread}) NexaLink` : "NexaLink";
+  }, [mesh.rooms]);
+
+  const [profile, setProfile] = useState<UserProfile>(initialProfile || defaultProfile);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [callOpen, setCallOpen] = useState(false);
+  const [callType, setCallType] = useState<CallType>("audio");
+  const [activeCall, setActiveCall] = useState<MatrixCall | null>(null);
+  const [incomingCall, setIncomingCall] = useState<MatrixCall | null>(null);
+  const [incomingCallerName, setIncomingCallerName] = useState("");
+  const [groupSettingsOpen, setGroupSettingsOpen] = useState(false);
+  const [dmSettingsOpen, setDmSettingsOpen] = useState(false);
+  const [folders, setFolders] = useState<ChatFolder[]>([
+    { id: "fav-default", name: "Favorites", chatIds: [] },
+  ]);
+
+  // Topics stored per room (persisted in localStorage)
+  const [topicsMap, setTopicsMap] = useState<Record<string, Topic[]>>(() => {
+    try {
+      const saved = localStorage.getItem("nexalink-topics");
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore */ }
+    return {};
+  });
+
+  // Persist topics to localStorage
+  useEffect(() => {
+    localStorage.setItem("nexalink-topics", JSON.stringify(topicsMap));
+  }, [topicsMap]);
+
+  // Message-to-topic mapping (persisted in localStorage)
+  const [msgTopicMap, setMsgTopicMap] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem("nexalink-msg-topics");
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore */ }
+    return {};
+  });
+
+  useEffect(() => {
+    localStorage.setItem("nexalink-msg-topics", JSON.stringify(msgTopicMap));
+  }, [msgTopicMap]);
+
+  // Build chat list from server rooms (only room metadata, no messages)
+  const chatList: Chat[] = useMemo(() => mesh.rooms.map((room) => ({
+    id: room.id,
+    name: room.name,
+    avatar: room.avatar,
+    avatarUrl: room.avatarUrl,
+    type: room.type,
+    online: room.online,
+    lastMessage: room.lastMessage,
+    lastMessageTime: room.lastMessageTime,
+    unread: room.unread,
+    pinned: false,
+    members: room.members,
+    topics: topicsMap[room.id] || undefined,
+    messages: [],
+  })), [mesh.rooms, topicsMap]);
+
+  // Only load messages for the selected chat
+  const selectedChat = useMemo(() => {
+    const chat = chatList.find((c) => c.id === selectedChatId);
+    if (!chat) return null;
+    const messages = mesh.getMessages(chat.id);
+    return {
+      ...chat,
+      messages: messages.map((m) => ({
+        id: m.id,
+        senderId: m.isOwn ? "me" : m.senderId,
+        text: m.text,
+        timestamp: m.timestamp,
+        read: true,
+        topicId: m.topicId || msgTopicMap[m.id] || undefined,
+        replyToId: m.replyToId,
+        replyToText: m.replyToText,
+        reactions: m.reactions,
+        media: m.mediaUrl ? [{
+          id: m.id + "-media",
+          type: m.mediaType || "image" as const,
+          name: m.mediaName || "file",
+          url: m.mediaUrl,
+          size: 0,
+          mimeType: m.mediaType === "video" ? "video/mp4" : m.mediaType === "audio" ? "audio/mpeg" : "image/jpeg",
+        }] : undefined,
+      })),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatList, selectedChatId, mesh.messageVersion, msgTopicMap]);
+
+  const handleSelectChat = (id: string) => {
+    setSelectedChatId(id);
+    if (window.innerWidth < 768) setSidebarOpen(false);
+
+    // Mark messages as read by sending read receipt for last event
+    if (mesh.client) {
+      const room = mesh.client.getRoom(id);
+      if (room) {
+        const timeline = room.getLiveTimeline().getEvents();
+        const lastEvent = timeline[timeline.length - 1];
+        if (lastEvent) {
+          mesh.client.sendReadReceipt(lastEvent).catch(() => {});
+        }
+      }
+    }
+  };
+
+  const handleSendMessage = useCallback(async (chatId: string, text: string, media?: MediaAttachment[], topicId?: string | null) => {
+    // Send media files first
+    if (media && media.length > 0) {
+      for (const attachment of media) {
+        try {
+          const resp = await fetch(attachment.url);
+          const blob = await resp.blob();
+          const file = new File([blob], attachment.name, { type: attachment.mimeType });
+          await mesh.sendMedia(chatId, file, topicId);
+        } catch (err) {
+          console.error("Failed to send media:", err);
+        }
+      }
+    }
+    // Send text if any
+    if (text.trim()) {
+      await mesh.sendMessage(chatId, text.trim(), topicId);
+    }
+  }, [mesh]);
+
+  const handleCreateChat = useCallback(async (chat: Chat) => {
+    try {
+      let roomId: string;
+      if (chat.type === "dm") {
+        const users = await mesh.searchUsers(chat.name);
+        if (users.length > 0) {
+          roomId = await mesh.createDm(users[0].userId);
+        } else {
+          roomId = await mesh.createDm(chat.name);
+        }
+      } else if (chat.type === "channel") {
+        roomId = await mesh.createChannel(chat.name);
+      } else {
+        roomId = await mesh.createGroup(chat.name, []);
+      }
+      setSelectedChatId(roomId);
+      if (window.innerWidth < 768) setSidebarOpen(false);
+      toast.success(chat.type === "channel" ? "Channel created!" : chat.type === "group" ? "Group created!" : "Chat started!");
+    } catch (err) {
+      console.error("Failed to create chat:", err);
+      toast.error("Failed to create. Try again.");
+    }
+  }, [mesh]);
+
+  const handleAddStory = (items: StoryItem[]) => {
+    const existing = stories.find((s) => s.userId === "me");
+    if (existing) {
+      setStories((prev) =>
+        prev.map((s) => s.userId === "me" ? { ...s, items: [...s.items, ...items] } : s),
+      );
+    } else {
+      setStories((prev) => [
+        { id: `story-${Date.now()}`, userId: "me", userName: profile.name, avatar: profile.avatarInitials, items, viewed: true },
+        ...prev,
+      ]);
+    }
+  };
+
+  const handleUpdateProfile = (updated: UserProfile) => {
+    setProfile(updated);
+    onProfileChange?.(updated);
+  };
+
+  // Listen for incoming calls
+  useEffect(() => {
+    const client = mesh.client;
+    if (!client) return;
+
+    const onIncoming = (call: MatrixCall) => {
+      console.log("Incoming call from:", call.invitee);
+      const callerId = call.getOpponentMember()?.userId || "Unknown";
+      setIncomingCallerName(getUserDisplayName(client, callerId));
+      setIncomingCall(call);
+    };
+
+    client.on(CallEventHandlerEvent.Incoming, onIncoming);
+    return () => { client.removeListener(CallEventHandlerEvent.Incoming, onIncoming); };
+  }, [mesh.client]);
+
+  const handleCall = useCallback((type: CallType) => {
+    if (!mesh.client || !selectedChatId) return;
+
+    if (!mesh.client.supportsVoip()) {
+      console.error("VoIP not supported by this client");
+      return;
+    }
+
+    const call = mesh.client.createCall(selectedChatId);
+    if (!call) {
+      console.error("Failed to create call for room:", selectedChatId);
+      return;
+    }
+
+    // Listen for errors before placing call
+    call.on("error" as CallEvent, (err: unknown) => {
+      console.error("Call error:", err);
+    });
+
+    setActiveCall(call);
+    setCallType(type);
+    setCallOpen(true);
+
+    if (type === "video") {
+      call.placeVideoCall().catch((err) => {
+        console.error("Failed to place video call:", err);
+        setCallOpen(false);
+        setActiveCall(null);
+      });
+    } else {
+      call.placeVoiceCall().catch((err) => {
+        console.error("Failed to place voice call:", err);
+        setCallOpen(false);
+        setActiveCall(null);
+      });
+    }
+  }, [mesh.client, selectedChatId]);
+
+  const handleAcceptIncoming = useCallback((video: boolean) => {
+    if (!incomingCall) return;
+    setActiveCall(incomingCall);
+    setCallType(video ? "video" : "audio");
+    setCallOpen(true);
+    setIncomingCall(null);
+    // answer(audio, video) -- audio is always true, video depends on user choice
+    incomingCall.answer(true, video).catch((err) => {
+      console.error("Failed to answer call:", err);
+      setCallOpen(false);
+      setActiveCall(null);
+    });
+  }, [incomingCall]);
+
+  const handleRejectIncoming = useCallback(() => {
+    if (!incomingCall) return;
+    incomingCall.reject();
+    setIncomingCall(null);
+  }, [incomingCall]);
+
+  const handleEndCall = useCallback(() => {
+    setCallOpen(false);
+    setActiveCall(null);
+  }, []);
+
+  const handleUpdateChat = (_updated: Chat) => {
+    // Room updates handled by server sync
+  };
+
+  const handleCreateTopic = useCallback((chatId: string, name: string, icon: string) => {
+    setTopicsMap((prev) => {
+      const existing = prev[chatId] || [];
+      const newTopic: Topic = {
+        id: `topic-${Date.now()}`,
+        name,
+        icon,
+        messageCount: 0,
+        lastMessage: "Topic created",
+        lastMessageTime: "now",
+      };
+      return { ...prev, [chatId]: [...existing, newTopic] };
+    });
+  }, []);
+
+  const handleDeleteTopic = useCallback((chatId: string, topicId: string) => {
+    setTopicsMap((prev) => {
+      const existing = prev[chatId] || [];
+      return { ...prev, [chatId]: existing.filter((t) => t.id !== topicId) };
+    });
+  }, []);
+
+  const handleDeleteChat = useCallback(async (chatId: string) => {
+    await mesh.leaveRoom(chatId);
+    if (selectedChatId === chatId) setSelectedChatId(null);
+  }, [mesh, selectedChatId]);
+
+  const handleBlockUser = (chatId: string) => {
+    const chat = chatList.find((c) => c.id === chatId);
+    if (chat) {
+      console.log(`Blocked user in chat: ${chat.name}`);
+    }
+  };
+
+  const handleSearch = useCallback(async (query: string): Promise<SearchResult[]> => {
+    const results: SearchResult[] = [];
+    const lowerQuery = query.toLowerCase();
+
+    // 1. Search MY existing chats first (DMs, groups, channels I'm already in)
+    // This is like Telegram: typing a name shows your existing conversation FIRST
+    if (mesh.client) {
+      const rooms = mesh.client.getRooms();
+      for (const room of rooms) {
+        if (room.getMyMembership() !== "join") continue;
+        const members = room.getJoinedMembers();
+        const isDm = members.length <= 2 && room.getJoinRule?.() !== "public";
+
+        // Get proper display name
+        let displayName = "";
+        if (isDm) {
+          // DM: show other person's name
+          const other = members.find((m) => m.userId !== mesh.userId);
+          displayName = other?.name || other?.userId?.split(":")[0].replace("@", "") || room.name || "";
+        } else {
+          // Group/Channel: get from state event first, then room.name
+          try {
+            const nameEvent = room.currentState.getStateEvents("m.room.name", "");
+            if (nameEvent) displayName = nameEvent.getContent()?.name || "";
+          } catch {}
+          if (!displayName) displayName = room.name || "";
+          // Skip if name looks like user list
+          if (displayName.startsWith("@") || (displayName.includes(",") && displayName.includes("@"))) continue;
+        }
+
+        if (!displayName) continue;
+
+        // Match by name
+        if (displayName.toLowerCase().includes(lowerQuery)) {
+          if (!results.find((r) => r.id === room.roomId)) {
+            results.push({
+              type: "room",
+              id: room.roomId,
+              name: displayName,
+              avatar: displayName.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2) || "??",
+              members: room.getJoinedMemberCount(),
+            });
+          }
+        }
+      }
+    }
+
+    // 2. Search public rooms (groups/channels from registry)
+    try {
+      const serverRooms = await mesh.searchRooms(query);
+      for (const r of serverRooms) {
+        if (!results.find((x) => x.id === r.id)) {
+          results.push({
+            type: "room",
+            id: r.id,
+            name: r.name,
+            avatar: r.avatar,
+            members: r.members,
+          });
+        }
+      }
+    } catch { /* optional */ }
+
+    // 3. Search users on the server (for starting new DMs)
+    try {
+      const users = await mesh.searchUsers(query);
+      for (const u of users) {
+        if (u.userId === mesh.userId) continue;
+        // Skip if we already have a chat with this user in results
+        if (results.find((r) => r.name.toLowerCase() === u.displayName.toLowerCase())) continue;
+        results.push({
+          type: "user",
+          id: u.userId,
+          name: u.displayName,
+          avatar: u.displayName.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2) || "??",
+        });
+      }
+    } catch { /* optional */ }
+
+    return results;
+  }, [mesh]);
+
+  const handleStartDm = useCallback(async (userId: string) => {
+    try {
+      const roomId = await mesh.createDm(userId);
+      setSelectedChatId(roomId);
+      if (window.innerWidth < 768) setSidebarOpen(false);
+    } catch (err) {
+      console.error("Failed to start DM:", err);
+    }
+  }, [mesh]);
+
+  const handleJoinRoom = useCallback(async (roomId: string) => {
+    try {
+      // If already in this room, just select it
+      if (mesh.client) {
+        const room = mesh.client.getRoom(roomId);
+        if (room && room.getMyMembership() === "join") {
+          setSelectedChatId(roomId);
+          if (window.innerWidth < 768) setSidebarOpen(false);
+          return;
+        }
+      }
+      // Otherwise join
+      const joined = await mesh.joinRoom(roomId);
+      setSelectedChatId(joined);
+      if (window.innerWidth < 768) setSidebarOpen(false);
+    } catch (err) {
+      console.error("Failed to join room:", err);
+    }
+  }, [mesh]);
+
+  const handleDeleteMessage = useCallback(async (chatId: string, messageId: string) => {
+    try {
+      await mesh.deleteMessage(chatId, messageId);
+    } catch (err) {
+      console.error("Failed to delete message:", err);
+    }
+  }, [mesh]);
+
+  const handleBack = () => setSidebarOpen(true);
+
+  // Show loading while connecting
+  if (!mesh.ready) {
+    return (
+      <div className="flex h-[100dvh] w-full items-center justify-center bg-background overflow-hidden">
+        <div className="pointer-events-none absolute top-1/4 left-1/4 h-96 w-96 rounded-full bg-primary/20 blur-3xl animate-pulse" />
+        <div className="pointer-events-none absolute bottom-1/4 right-1/4 h-96 w-96 rounded-full bg-accent/20 blur-3xl animate-pulse" style={{ animationDelay: "1s" }} />
+        <div className="flex flex-col items-center gap-5 animate-fade-in-up">
+          <div className="relative">
+            <div className="absolute inset-0 gradient-primary blur-2xl opacity-50 animate-pulse rounded-3xl" />
+            <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl gradient-primary shadow-elegant">
+              <span className="text-3xl font-bold text-primary-foreground">M</span>
+            </div>
+          </div>
+          <div className="text-center">
+            <h1 className="font-serif italic text-2xl gradient-text mb-1">NexaLink</h1>
+            <p className="text-xs text-muted-foreground">Connecting securely...</p>
+          </div>
+          <div className="flex gap-1">
+            {[0,1,2].map((i) => (
+              <div key={i} className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: `${i * 150}ms` }} />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Show error if connection failed
+  if (mesh.error) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4 max-w-sm text-center">
+          <div className="h-12 w-12 rounded-2xl bg-destructive/20 flex items-center justify-center">
+            <span className="text-destructive text-xl">!</span>
+          </div>
+          <p className="text-sm text-foreground font-medium">Connection Error</p>
+          <p className="text-xs text-muted-foreground">{mesh.error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded-2xl px-6 py-2.5 text-sm font-semibold gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02] transition-all"
+          >
+            Retry
+          </button>
+          <button
+            onClick={onLogout}
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Sign out and try again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-[100dvh] w-full overflow-hidden">
+      {/* Connection status bar */}
+      <ConnectionStatus />
+      <KeyboardShortcuts />
+      <PwaInstallBanner />
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className={`${sidebarOpen ? "flex" : "hidden"} md:flex w-full md:w-auto flex-shrink-0`}>
+        <ErrorBoundary fallbackTitle="Sidebar error">
+        <ChatSidebar
+          chats={chatList}
+          stories={stories}
+          profile={profile}
+          folders={folders}
+          selectedChatId={selectedChatId}
+          onSelectChat={handleSelectChat}
+          onCreateChat={handleCreateChat}
+          onAddStory={handleAddStory}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onFoldersChange={setFolders}
+          onSearch={handleSearch}
+          onStartDm={handleStartDm}
+          onJoinRoom={handleJoinRoom}
+        />
+        </ErrorBoundary>
+      </div>
+      <div className={`${!sidebarOpen ? "flex" : "hidden"} md:flex flex-1 min-w-0`}>
+        <ErrorBoundary fallbackTitle="Chat error">
+        {selectedChat ? (
+          <ChatView
+            chat={selectedChat}
+            onSendMessage={handleSendMessage}
+            onBack={handleBack}
+            onCall={selectedChat.type !== "channel" ? handleCall : undefined}
+            onCreateTopic={handleCreateTopic}
+            onDeleteTopic={handleDeleteTopic}
+            onSettingsClick={
+              selectedChat.type === "group" || selectedChat.type === "channel"
+                ? () => setGroupSettingsOpen(true)
+                : undefined
+            }
+            onDmSettingsClick={
+              selectedChat.type === "dm" ? () => setDmSettingsOpen(true) : undefined
+            }
+          />
+        ) : (
+          <EmptyChat />
+        )}
+        </ErrorBoundary>
+      </div>
+
+      {selectedChat && (selectedChat.type === "group" || selectedChat.type === "channel") && (
+        <GroupSettingsDialog
+          open={groupSettingsOpen}
+          chat={selectedChat}
+          contacts={defaultContacts}
+          folders={folders}
+          onClose={() => setGroupSettingsOpen(false)}
+          onUpdateChat={handleUpdateChat}
+          onDeleteChat={handleDeleteChat}
+          onFoldersChange={setFolders}
+        />
+      )}
+
+      {selectedChat && selectedChat.type === "dm" && (
+        <DmSettingsDialog
+          open={dmSettingsOpen}
+          chat={selectedChat}
+          folders={folders}
+          onClose={() => setDmSettingsOpen(false)}
+          onUpdateChat={handleUpdateChat}
+          onDeleteChat={handleDeleteChat}
+          onFoldersChange={setFolders}
+          onBlockUser={handleBlockUser}
+        />
+      )}
+
+      <AccountSettings
+        open={settingsOpen}
+        profile={profile}
+        onClose={() => setSettingsOpen(false)}
+        onUpdate={handleUpdateProfile}
+        onLogout={() => { setSettingsOpen(false); onLogout?.(); }}
+      />
+
+      {selectedChat && (
+        <CallScreen
+          open={callOpen}
+          type={callType}
+          contactName={selectedChat.name}
+          contactAvatar={selectedChat.avatar}
+          matrixCall={activeCall}
+          onEnd={handleEndCall}
+        />
+      )}
+
+      {incomingCall && !callOpen && (
+        <IncomingCallBanner
+          callerName={incomingCallerName}
+          onAccept={handleAcceptIncoming}
+          onReject={handleRejectIncoming}
+        />
+      )}
+      </div>
+    </div>
+  );
+};
+
+/** Connection status indicator */
+function ConnectionStatus() {
+  const [online, setOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const goOnline = () => setOnline(true);
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, []);
+
+  if (online) return null;
+
+  return (
+    <div className="flex items-center justify-center gap-2 py-1.5 bg-destructive/20 border-b border-destructive/30 text-destructive text-xs font-medium animate-fade-in-up">
+      <div className="h-2 w-2 rounded-full bg-destructive animate-pulse" />
+      No internet connection — waiting to reconnect...
+    </div>
+  );
+}
+
+export default Index;

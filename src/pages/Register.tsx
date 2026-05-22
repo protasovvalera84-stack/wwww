@@ -1,0 +1,726 @@
+import { useState, useRef, useEffect } from "react";
+import {
+  Sparkles, Camera, ChevronRight, ChevronLeft, Globe, Monitor,
+  Smartphone, Download, Check, Search, User, AtSign, Lock, Eye, EyeOff,
+  Loader2, AlertCircle,
+} from "lucide-react";
+import { languages, platforms, PlatformId } from "@/data/languages";
+import { UserProfile } from "@/data/mockData";
+import { registerAccount, loginAccount, checkServer, NexaLinkSession } from "@/lib/meshClient";
+
+interface RegisterPageProps {
+  onComplete: (profile: UserProfile, language: string, platform: PlatformId | null) => void;
+}
+
+type Step = "welcome" | "login" | "language" | "platform" | "profile" | "done";
+
+async function resizeAvatar(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const sx = (bitmap.width - side) / 2;
+  const sy = (bitmap.height - side) / 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no ctx");
+  ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, 256, 256);
+  bitmap.close();
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+function detectPlatform(): PlatformId {
+  const ua = navigator.userAgent.toLowerCase();
+  if (/iphone|ipad|ipod/.test(ua)) return "ios";
+  if (/android/.test(ua)) return "android";
+  if (/win/.test(ua)) return "windows";
+  return "linux";
+}
+
+export default function RegisterPage({ onComplete }: RegisterPageProps) {
+  // Skip welcome/platform screens on installed apps (Electron, PWA, Android WebView)
+  const isInstalledApp = !!(window as any).nexalink?.isDesktop
+    || window.matchMedia("(display-mode: standalone)").matches
+    || window.matchMedia("(display-mode: fullscreen)").matches
+    || (window.navigator as any).standalone === true
+    || /NexaLinkAndroid/i.test(navigator.userAgent);
+  const [step, setStep] = useState<Step>(isInstalledApp ? "login" : "welcome");
+  const [lang, setLang] = useState("en");
+  const [langSearch, setLangSearch] = useState("");
+  const [platform, setPlatform] = useState<PlatformId | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [password, setPassword] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // Auto-detect platform when step opens
+  useEffect(() => {
+    if (step === "platform" && !platform) {
+      setPlatform(detectPlatform());
+    }
+  }, [step, platform]);
+
+  const filteredLangs = languages.filter(
+    (l) =>
+      !langSearch ||
+      l.name.toLowerCase().includes(langSearch.toLowerCase()) ||
+      l.native.toLowerCase().includes(langSearch.toLowerCase()),
+  );
+
+  const handleAvatarPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    try {
+      const url = await resizeAvatar(file);
+      setAvatarUrl(url);
+    } catch { /* ignore */ }
+  };
+
+  // Login state
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
+  const [registering, setRegistering] = useState(false);
+  const [regError, setRegError] = useState<string | null>(null);
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
+
+  // Check if NexaLink server is reachable on mount
+  useEffect(() => {
+    checkServer().then(setServerOnline);
+  }, []);
+
+  const handleFinish = async () => {
+    const finalUsername = username.trim() || "user_" + Math.random().toString(36).slice(2, 8);
+    const finalName = name.trim() || "Anonymous";
+    const initials = finalName.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "ME";
+
+    setRegistering(true);
+    setRegError(null);
+
+    try {
+      // Register on the NexaLink server
+      const session: NexaLinkSession = await registerAccount(finalUsername, password, finalName);
+
+      const profile: UserProfile = {
+        name: finalName,
+        username: finalUsername,
+        bio: "",
+        avatarUrl,
+        avatarInitials: initials,
+        peerId: session.userId,
+        privacy: {
+          lastSeen: "everyone",
+          profilePhoto: "everyone",
+          forwarding: "everyone",
+          calls: "everyone",
+          groups: "contacts",
+          readReceipts: true,
+          onlineStatus: true,
+        },
+      };
+      onComplete(profile, lang, platform);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Registration failed";
+      setRegError(message);
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  const handleLogin = async () => {
+    if (!loginUsername.trim() || !loginPassword) return;
+    setLoggingIn(true);
+    setLoginError(null);
+
+    try {
+      const session: NexaLinkSession = await loginAccount(loginUsername.trim(), loginPassword);
+      const displayName = session.userId.split(":")[0].replace("@", "");
+      const initials = displayName.split("_").map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "ME";
+
+      const profile: UserProfile = {
+        name: displayName,
+        username: loginUsername.trim(),
+        bio: "",
+        avatarUrl: null,
+        avatarInitials: initials,
+        peerId: session.userId,
+        privacy: {
+          lastSeen: "everyone",
+          profilePhoto: "everyone",
+          forwarding: "everyone",
+          calls: "everyone",
+          groups: "contacts",
+          readReceipts: true,
+          onlineStatus: true,
+        },
+      };
+      onComplete(profile, "en", null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Login failed";
+      setLoginError(message);
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  /** Download a file -- uses direct link with download attribute */
+  const forceDownload = (url: string, fileName: string) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.rel = "noopener noreferrer";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => document.body.removeChild(a), 200);
+  };
+
+  const handleInstall = () => {
+    if (!platform) return;
+
+    if (platform === "ios") {
+      // iOS: no download needed, just go to profile (PWA)
+      setStep("profile");
+      return;
+    }
+
+    setDownloading(true);
+    if (platform === "android") {
+      // Native Kotlin APK first, fallback to WebView APK, then PWA
+      fetch("/installers/native/NexaLink-Android.apk", { method: "HEAD" }).then((r) => {
+        if (r.ok) {
+          forceDownload("/installers/native/NexaLink-Android.apk", "NexaLink-Android.apk");
+        } else {
+          // Fallback to WebView APK
+          fetch("/installers/NexaLink.apk", { method: "HEAD" }).then((r2) => {
+            if (r2.ok) {
+              forceDownload("/installers/NexaLink.apk", "NexaLink.apk");
+            } else {
+              window.open(`${window.location.origin}/installers/NexaLink-Android.html`, "_blank");
+            }
+          }).catch(() => {
+            window.open(`${window.location.origin}/installers/NexaLink-Android.html`, "_blank");
+          });
+        }
+      }).catch(() => {
+        window.open(`${window.location.origin}/installers/NexaLink-Android.html`, "_blank");
+      });
+    } else if (platform === "linux") {
+      // Native GTK4 binary first, fallback to Electron AppImage
+      fetch("/installers/native/NexaLink-Linux", { method: "HEAD" }).then((r) => {
+        if (r.ok) {
+          forceDownload("/installers/native/NexaLink-Linux", "NexaLink-Linux");
+        } else {
+          forceDownload("/installers/desktop/NexaLink-1.0.0.AppImage", "NexaLink.AppImage");
+        }
+      }).catch(() => {
+        forceDownload("/installers/desktop/NexaLink-1.0.0.AppImage", "NexaLink.AppImage");
+      });
+    } else {
+      // Native C# EXE first, fallback to Electron EXE
+      fetch("/installers/native/NexaLink-Windows.exe", { method: "HEAD" }).then((r) => {
+        if (r.ok) {
+          forceDownload("/installers/native/NexaLink-Windows.exe", "NexaLink-Windows.exe");
+        } else {
+          forceDownload("/installers/desktop/NexaLink-Setup-1.0.0.exe", "NexaLink-Setup.exe");
+        }
+      }).catch(() => {
+        forceDownload("/installers/desktop/NexaLink-Setup-1.0.0.exe", "NexaLink-Setup.exe");
+      });
+    }
+    setTimeout(() => {
+      setDownloading(false);
+      setStep("profile");
+    }, 1500);
+  };
+
+  const canProceedProfile = name.trim().length >= 2 && password.length >= 6;
+
+  const detectedPlatformInfo = platform ? platforms.find((p) => p.id === platform) : null;
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-4">
+      <div className="pointer-events-none fixed inset-0" style={{ backgroundImage: "var(--gradient-mesh)", backgroundAttachment: "fixed" }} />
+      <div className="pointer-events-none fixed top-1/4 left-1/4 h-96 w-96 rounded-full bg-primary/15 blur-3xl animate-float" />
+      <div className="pointer-events-none fixed bottom-1/4 right-1/4 h-80 w-80 rounded-full bg-accent/15 blur-3xl animate-float" style={{ animationDelay: "2s" }} />
+
+      <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarPick} />
+
+      <div className="relative w-full max-w-md">
+        {/* ===== WELCOME ===== */}
+        {step === "welcome" && (
+          <div className="flex flex-col items-center gap-8 text-center animate-fade-in-up">
+            <div className="relative">
+              <div className="absolute inset-0 gradient-primary blur-2xl opacity-50 animate-glow rounded-3xl" />
+              <div className="relative flex h-24 w-24 items-center justify-center rounded-3xl gradient-primary shadow-elegant">
+                <Sparkles className="h-12 w-12 text-primary-foreground" />
+              </div>
+            </div>
+            <div>
+              <h1 className="font-serif italic text-5xl gradient-text mb-3">NexaLink</h1>
+              <p className="text-base text-muted-foreground max-w-sm leading-relaxed">
+                Self-hosted, end-to-end encrypted messenger. Messages delivered and deleted — your device keeps the history.
+              </p>
+              {/* Relay model badge */}
+              <div className="inline-flex items-center gap-1.5 mt-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20">
+                <Timer className="h-3 w-3 text-primary" />
+                <span className="text-[10px] font-mono text-primary">Relay model · server stores nothing permanently</span>
+              </div>
+            </div>
+            <button
+              onClick={() => setStep("language")}
+              disabled={serverOnline === false}
+              className={`w-full max-w-xs rounded-2xl py-3.5 text-sm font-semibold transition-all ${
+                serverOnline === false
+                  ? "bg-secondary text-muted-foreground cursor-not-allowed"
+                  : "gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02]"
+              }`}
+            >
+              Create Account
+            </button>
+            <button
+              onClick={() => setStep("login")}
+              disabled={serverOnline === false}
+              className={`w-full max-w-xs rounded-2xl py-3 text-sm font-medium transition-all ${
+                serverOnline === false
+                  ? "bg-secondary text-muted-foreground cursor-not-allowed"
+                  : "text-foreground border border-border/50 hover:bg-surface-hover hover:border-primary/40"
+              }`}
+            >
+              Sign In
+            </button>
+            {serverOnline === true && (
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-online animate-pulse" />
+                <p className="text-[10px] font-mono text-online">Server online</p>
+              </div>
+            )}
+            {serverOnline === false && (
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-destructive" />
+                <p className="text-[10px] font-mono text-destructive">Server offline - check connection</p>
+              </div>
+            )}
+            {serverOnline === null && (
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                <p className="text-[10px] font-mono text-muted-foreground">Checking server...</p>
+              </div>
+            )}
+            <p className="text-[10px] font-mono text-muted-foreground">No phone number required - fully anonymous</p>
+          </div>
+        )}
+
+        {/* ===== LOGIN ===== */}
+        {step === "login" && (
+          <div className="rounded-3xl glass-strong border border-border/60 shadow-elegant p-6 animate-fade-in-up">
+            <div className="flex items-center gap-3 mb-5">
+              <button onClick={() => setStep("welcome")} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
+                <ChevronLeft className="h-4 w-4 text-muted-foreground" />
+              </button>
+              <div className="flex-1">
+                <h2 className="text-lg font-serif italic gradient-text">Sign In</h2>
+                <p className="text-[11px] text-muted-foreground">Welcome back to NexaLink</p>
+              </div>
+              <Lock className="h-5 w-5 text-primary" />
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Username</label>
+                <div className="flex items-center gap-3 rounded-2xl glass border border-border/50 px-4 py-3 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+                  <AtSign className="h-4 w-4 text-muted-foreground" />
+                  <input
+                    type="text"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""))}
+                    placeholder="username"
+                    autoFocus
+                    className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Password</label>
+                <div className="flex items-center gap-3 rounded-2xl glass border border-border/50 px-4 py-3 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+                  <Lock className="h-4 w-4 text-muted-foreground" />
+                  <input
+                    type={showLoginPassword ? "text" : "password"}
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Your password"
+                    onKeyDown={(e) => e.key === "Enter" && loginUsername.trim() && loginPassword && handleLogin()}
+                    className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
+                  />
+                  <button onClick={() => setShowLoginPassword((s) => !s)} className="text-muted-foreground hover:text-primary transition-colors">
+                    {showLoginPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {loginError && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-destructive/10 border border-destructive/20">
+                  <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+                  <p className="text-[11px] text-destructive">{loginError}</p>
+                </div>
+              )}
+
+              <button
+                onClick={handleLogin}
+                disabled={!loginUsername.trim() || !loginPassword || loggingIn}
+                className={`w-full rounded-2xl py-3.5 text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+                  loginUsername.trim() && loginPassword && !loggingIn
+                    ? "gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02]"
+                    : "bg-secondary text-muted-foreground cursor-not-allowed"
+                }`}
+              >
+                {loggingIn ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Signing in...</>
+                ) : (
+                  "Sign In"
+                )}
+              </button>
+
+              <div className="text-center">
+                <button
+                  onClick={() => setStep("language")}
+                  className="text-xs font-medium text-primary hover:underline"
+                >
+                  Don't have an account? Create one
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===== LANGUAGE ===== */}
+        {step === "language" && (
+          <div className="rounded-3xl glass-strong border border-border/60 shadow-elegant p-6 animate-fade-in-up">
+            <div className="flex items-center gap-3 mb-5">
+              <button onClick={() => setStep("welcome")} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
+                <ChevronLeft className="h-4 w-4 text-muted-foreground" />
+              </button>
+              <div className="flex-1">
+                <h2 className="text-lg font-serif italic gradient-text">Choose Language</h2>
+                <p className="text-[11px] text-muted-foreground">Select your preferred language</p>
+              </div>
+              <Globe className="h-5 w-5 text-primary" />
+            </div>
+
+            <div className="flex items-center gap-2.5 rounded-2xl glass border border-border/50 px-4 py-2.5 mb-4 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+              <Search className="h-4 w-4 text-muted-foreground" />
+              <input type="text" placeholder="Search language..." value={langSearch} onChange={(e) => setLangSearch(e.target.value)} className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none" />
+            </div>
+
+            <div className="max-h-[45vh] overflow-y-auto scrollbar-thin space-y-1 -mx-1 px-1">
+              {filteredLangs.map((l) => (
+                <button key={l.code} onClick={() => setLang(l.code)} className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-all ${lang === l.code ? "bg-primary/10 border border-primary/30 shadow-glow" : "hover:bg-surface-hover border border-transparent"}`}>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-foreground">{l.native}</p>
+                    <p className="text-[11px] text-muted-foreground">{l.name}</p>
+                  </div>
+                  {lang === l.code && (
+                    <div className="flex h-6 w-6 items-center justify-center rounded-full gradient-primary">
+                      <Check className="h-3.5 w-3.5 text-primary-foreground" />
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            <button onClick={() => setStep(isInstalledApp ? "profile" : "platform")} className="mt-4 w-full rounded-2xl py-3 text-sm font-semibold gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02] transition-all">
+              Continue <ChevronRight className="h-4 w-4 inline ml-1" />
+            </button>
+          </div>
+        )}
+
+        {/* ===== PLATFORM ===== */}
+        {step === "platform" && (
+          <div className="rounded-3xl glass-strong border border-border/60 shadow-elegant p-6 animate-fade-in-up">
+            <div className="flex items-center gap-3 mb-5">
+              <button onClick={() => setStep("language")} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
+                <ChevronLeft className="h-4 w-4 text-muted-foreground" />
+              </button>
+              <div className="flex-1">
+                <h2 className="text-lg font-serif italic gradient-text">Install App</h2>
+                <p className="text-[11px] text-muted-foreground">
+                  {detectedPlatformInfo ? `Detected: ${detectedPlatformInfo.name}` : "Choose your platform"}
+                </p>
+              </div>
+              <Monitor className="h-5 w-5 text-primary" />
+            </div>
+
+            {/* Platform selector */}
+            <div className="flex gap-2 mb-5">
+              {platforms.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setPlatform(p.id)}
+                  className={`flex-1 flex flex-col items-center gap-1.5 rounded-2xl border py-3 transition-all ${
+                    platform === p.id
+                      ? "border-primary/50 bg-primary/10 shadow-glow"
+                      : "border-border/50 hover:border-primary/30 hover:bg-surface-hover"
+                  }`}
+                >
+                  <div className={`flex h-10 w-10 items-center justify-center rounded-xl text-sm font-bold ${
+                    p.id === "windows" ? "bg-blue-500/20 text-blue-400" :
+                    p.id === "linux" ? "bg-orange-500/20 text-orange-400" :
+                    p.id === "android" ? "bg-green-500/20 text-green-400" :
+                    "bg-gray-500/20 text-gray-400"
+                  }`}>
+                    {p.id === "windows" ? <Monitor className="h-4 w-4" /> :
+                     p.id === "linux" ? "L" :
+                     p.id === "ios" ? "i" :
+                     <Smartphone className="h-4 w-4" />}
+                  </div>
+                  <span className="text-[11px] font-medium text-foreground">{p.name}</span>
+                  {platform === p.id && <Check className="h-3 w-3 text-primary" />}
+                </button>
+              ))}
+            </div>
+
+            {/* Install info for selected platform */}
+            {detectedPlatformInfo && (
+              <div className="rounded-2xl glass border border-border/50 p-4 mb-4">
+                <p className="text-sm font-semibold text-foreground mb-2">{detectedPlatformInfo.name}</p>
+
+                {platform === "android" && (
+                  <div className="space-y-2 text-[12px] text-muted-foreground">
+                    <p>The NexaLink APK will be downloaded automatically after registration.</p>
+                    <div className="space-y-1.5 pl-1">
+                      <p>1. Open the downloaded <b className="text-foreground">NexaLink.apk</b> file</p>
+                      <p>2. Tap <b className="text-foreground">Install</b> (allow unknown sources if prompted)</p>
+                      <p>3. Open the app and log in with your new account</p>
+                    </div>
+                  </div>
+                )}
+
+                {platform === "ios" && (
+                  <div className="space-y-2 text-[12px] text-muted-foreground">
+                    <p>This app works directly in Safari. To add it to your home screen:</p>
+                    <div className="space-y-1.5 pl-1">
+                      <p>1. After registration, tap <b className="text-foreground">Share ↑</b> in Safari</p>
+                      <p>2. Tap <b className="text-foreground">"Add to Home Screen"</b></p>
+                      <p>3. The app icon will appear on your home screen</p>
+                    </div>
+                  </div>
+                )}
+
+                {platform === "windows" && (
+                  <div className="space-y-2 text-[12px] text-muted-foreground">
+                    <p>Downloads <b className="text-foreground">NexaLink-Install.bat</b></p>
+                    <div className="space-y-1.5 pl-1">
+                      <p>1. Double-click the downloaded file</p>
+                      <p>2. Installer creates a shortcut on Desktop and Start Menu</p>
+                      <p>3. Opens NexaLink automatically</p>
+                    </div>
+                  </div>
+                )}
+
+                {platform === "linux" && (
+                  <div className="space-y-2 text-[12px] text-muted-foreground">
+                    <p>Downloads <b className="text-foreground">nexalink-install.sh</b></p>
+                    <div className="space-y-1.5 pl-1">
+                      <p>1. Open terminal in Downloads folder</p>
+                      <p>2. Run: <code className="text-primary bg-primary/10 px-1.5 py-0.5 rounded text-[11px]">chmod +x nexalink-install.sh && ./nexalink-install.sh</code></p>
+                      <p>3. Creates Desktop shortcut and opens NexaLink</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Install button */}
+            <button
+              onClick={handleInstall}
+              disabled={!platform || downloading}
+              className={`w-full rounded-2xl py-3.5 text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+                !platform || downloading
+                  ? "bg-secondary text-muted-foreground cursor-not-allowed"
+                  : "gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02]"
+              }`}
+            >
+              {downloading ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Downloading...</>
+              ) : platform === "ios" ? (
+                <>Continue <ChevronRight className="h-4 w-4" /></>
+              ) : platform === "android" ? (
+                <><Download className="h-4 w-4" /> Download APK</>
+              ) : (
+                <><Download className="h-4 w-4" /> Download & Install</>
+              )}
+            </button>
+
+            {/* Skip */}
+            <button
+              onClick={() => setStep("profile")}
+              className="mt-3 w-full rounded-2xl py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-surface-hover transition-all"
+            >
+              Skip — use in browser
+            </button>
+          </div>
+        )}
+
+        {/* ===== PROFILE ===== */}
+        {step === "profile" && (
+          <div className="rounded-3xl glass-strong border border-border/60 shadow-elegant p-6 animate-fade-in-up">
+            <div className="flex items-center gap-3 mb-5">
+              <button onClick={() => setStep("platform")} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
+                <ChevronLeft className="h-4 w-4 text-muted-foreground" />
+              </button>
+              <div className="flex-1">
+                <h2 className="text-lg font-serif italic gradient-text">Create Account</h2>
+                <p className="text-[11px] text-muted-foreground">Set up your profile</p>
+              </div>
+            </div>
+
+            <div className="space-y-5">
+              <div className="flex flex-col items-center gap-2">
+                <div className="relative group cursor-pointer" onClick={() => fileRef.current?.click()}>
+                  {avatarUrl ? (
+                    <img src={avatarUrl} alt="Avatar" className="h-24 w-24 rounded-3xl object-cover border-2 border-primary/30 shadow-glow group-hover:opacity-80 transition-opacity" />
+                  ) : (
+                    <div className="flex h-24 w-24 items-center justify-center rounded-3xl gradient-primary text-2xl font-bold text-primary-foreground shadow-glow group-hover:opacity-80 transition-opacity">
+                      {name.trim() ? name.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2) : <Camera className="h-8 w-8" />}
+                    </div>
+                  )}
+                  <div className="absolute inset-0 flex items-center justify-center rounded-3xl bg-black/0 group-hover:bg-black/30 transition-colors">
+                    <Camera className="h-6 w-6 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </div>
+                </div>
+                <button onClick={() => fileRef.current?.click()} className="text-[11px] font-medium text-primary hover:underline">
+                  {avatarUrl ? "Change Photo" : "Add Photo"}
+                </button>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Display Name *</label>
+                <div className="flex items-center gap-3 rounded-2xl glass border border-border/50 px-4 py-3 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+                  <User className="h-4 w-4 text-muted-foreground" />
+                  <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" autoFocus className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Username</label>
+                <div className="flex items-center gap-3 rounded-2xl glass border border-border/50 px-4 py-3 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+                  <AtSign className="h-4 w-4 text-muted-foreground" />
+                  <input type="text" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""))} placeholder="username" className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Password</label>
+                <div className="flex items-center gap-3 rounded-2xl glass border border-border/50 px-4 py-3 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+                  <Lock className="h-4 w-4 text-muted-foreground" />
+                  <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Create a password (min 6 chars)" className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none" />
+                  <button onClick={() => setShowPassword((s) => !s)} className="text-muted-foreground hover:text-primary transition-colors">
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-primary/5 border border-primary/10">
+                <Lock className="h-4 w-4 text-primary flex-shrink-0" />
+                <p className="text-[11px] text-muted-foreground">
+                  {serverOnline === false
+                    ? "Server offline — registration will use local mode."
+                    : "No phone or email needed. Messages deleted from server after delivery — your device is the archive."}
+                </p>
+              </div>
+
+              {regError && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-destructive/10 border border-destructive/20">
+                  <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+                  <p className="text-[11px] text-destructive">{regError}</p>
+                </div>
+              )}
+
+              <button
+                onClick={() => { setStep("done"); handleFinish(); }}
+                disabled={!canProceedProfile || registering}
+                className={`w-full rounded-2xl py-3.5 text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+                  canProceedProfile && !registering ? "gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02]" : "bg-secondary text-muted-foreground cursor-not-allowed"
+                }`}
+              >
+                {registering ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Creating Account...</>
+                ) : (
+                  "Create Account"
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ===== DONE ===== */}
+        {step === "done" && (
+          <div className="flex flex-col items-center gap-6 text-center animate-fade-in-up">
+            {registering ? (
+              <>
+                <div className="relative">
+                  <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-primary/20 border-2 border-primary shadow-lg">
+                    <Loader2 className="h-10 w-10 text-primary animate-spin" />
+                  </div>
+                </div>
+                <div>
+                  <h2 className="text-2xl font-semibold text-foreground mb-2">Creating account...</h2>
+                  <p className="text-sm text-muted-foreground max-w-xs mx-auto">Registering on the NexaLink server and generating encryption keys.</p>
+                </div>
+              </>
+            ) : regError ? (
+              <>
+                <div className="relative">
+                  <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-destructive/20 border-2 border-destructive shadow-lg">
+                    <AlertCircle className="h-10 w-10 text-destructive" />
+                  </div>
+                </div>
+                <div>
+                  <h2 className="text-2xl font-semibold text-foreground mb-2">Registration failed</h2>
+                  <p className="text-sm text-destructive max-w-xs mx-auto">{regError}</p>
+                </div>
+                <button onClick={() => setStep("profile")} className="w-full max-w-xs rounded-2xl py-3.5 text-sm font-semibold gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02] transition-all">
+                  Go Back
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="relative">
+                  <div className="absolute inset-0 rounded-full bg-online/30 animate-ping" style={{ animationDuration: "1.5s" }} />
+                  <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-online/20 border-2 border-online shadow-lg">
+                    <Check className="h-10 w-10 text-online" />
+                  </div>
+                </div>
+                <div>
+                  <h2 className="text-2xl font-semibold text-foreground mb-2">Welcome, {name.trim() || "Anonymous"}!</h2>
+                  <p className="text-sm text-muted-foreground max-w-xs mx-auto">Your encrypted identity has been generated. Messages are relayed through the server and deleted after delivery — your device stores the history.</p>
+                </div>
+                <p className="text-[11px] font-mono text-muted-foreground">Redirecting to NexaLink...</p>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Step indicator */}
+        {step !== "welcome" && step !== "login" && step !== "done" && (
+          <div className="flex justify-center gap-2 mt-6">
+            {(["language", "platform", "profile"] as const).map((s, i) => (
+              <div key={s} className={`h-1.5 rounded-full transition-all ${
+                s === step ? "w-8 gradient-primary" :
+                (["language", "platform", "profile"].indexOf(step) > i) ? "w-4 bg-primary/40" : "w-4 bg-muted"
+              }`} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

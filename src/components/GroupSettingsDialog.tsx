@@ -1,0 +1,624 @@
+import { useState, useRef, useEffect } from "react";
+import {
+  X, ArrowLeft, Camera, Users, UserPlus, UserMinus, Shield, Hash,
+  Bell, BellOff, Lock, Trash2, LogOut, ChevronRight, Search, Check, Plus, Star, Link2, Copy, QrCode, Clock,
+} from "lucide-react";
+import { Chat, Contact, Topic, ChatFolder } from "@/data/mockData";
+import { useMesh } from "@/lib/MeshProvider";
+import { uploadMedia } from "@/lib/meshClient";
+
+interface GroupSettingsDialogProps {
+  open: boolean;
+  chat: Chat;
+  contacts: Contact[];
+  folders: ChatFolder[];
+  onClose: () => void;
+  onUpdateChat: (updated: Chat) => void;
+  onDeleteChat: (chatId: string) => void;
+  onFoldersChange: (folders: ChatFolder[]) => void;
+}
+
+type Page = "main" | "members" | "addMembers" | "privacy" | "topics" | "favorites" | "invite" | "slowmode" | "log" | "welcome";
+
+async function resizeImg(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 256;
+  const ctx = c.getContext("2d");
+  if (!ctx) throw new Error("no ctx");
+  ctx.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 256, 256);
+  bitmap.close();
+  return c.toDataURL("image/jpeg", 0.85);
+}
+
+export function GroupSettingsDialog({ open, chat, contacts, folders, onClose, onUpdateChat, onDeleteChat, onFoldersChange }: GroupSettingsDialogProps) {
+  const mesh = useMesh();
+  const [page, setPage] = useState<Page>("main");
+  const [draft, setDraft] = useState<Chat>({ ...chat });
+  const [memberSearch, setMemberSearch] = useState("");
+  const [serverSearchResults, setServerSearchResults] = useState<{ id: string; name: string; avatar: string }[]>([]);
+  const [selectedAdd, setSelectedAdd] = useState<Set<string>>(new Set());
+  const [muted, setMuted] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      setDraft({ ...chat });
+      setPage("main");
+      setMemberSearch("");
+      setSelectedAdd(new Set());
+    }
+  }, [open, chat]);
+
+  if (!open) return null;
+
+  const isChannel = chat.type === "channel";
+
+  // Get REAL members from Matrix room (not local draft)
+  const memberList = (() => {
+    if (!mesh.client) return [];
+    const room = mesh.client.getRoom(chat.id);
+    if (!room) return (draft.memberIds || []).map((id) =>
+      id === "me" ? { id: "me", name: "You", avatar: "ME", online: true, peerId: "" } : contacts.find((c) => c.id === id),
+    ).filter(Boolean);
+    const members = room.getJoinedMembers();
+    return members.map((m) => ({
+      id: m.userId,
+      name: m.name || m.userId.split(":")[0].replace("@", ""),
+      avatar: (m.name || m.userId)[0]?.toUpperCase() || "?",
+      online: false,
+      peerId: m.userId,
+    }));
+  })();
+
+  const availableToAdd = contacts.filter((c) => !(draft.memberIds || []).includes(c.id));
+  const filteredAdd = availableToAdd.filter((c) => !memberSearch || c.name.toLowerCase().includes(memberSearch.toLowerCase()));
+
+  const handleAvatarPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    try {
+      // Show preview immediately
+      const previewUrl = await resizeImg(file);
+      setDraft((d) => ({ ...d, avatarUrl: previewUrl }));
+
+      // Upload to Matrix server and set as room avatar
+      if (mesh.client) {
+        const mxcUri = await uploadMedia(
+          mesh.client.getAccessToken() || "",
+          file,
+        );
+        await mesh.client.sendStateEvent(chat.id, "m.room.avatar", { url: mxcUri }, "");
+      }
+    } catch (err) {
+      console.error("Failed to set room avatar:", err);
+    }
+  };
+
+  const handleRemoveGroupAvatar = async () => {
+    setDraft((d) => ({ ...d, avatarUrl: undefined }));
+    // Remove avatar from Matrix room
+    if (mesh.client) {
+      try {
+        await mesh.client.sendStateEvent(chat.id, "m.room.avatar", { url: "" }, "");
+      } catch (err) {
+        console.error("Failed to remove group avatar:", err);
+      }
+    }
+  };
+
+  const handleSave = () => {
+    const initials = draft.name.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "??";
+    onUpdateChat({ ...draft, avatar: initials, members: (draft.memberIds || []).length });
+    onClose();
+  };
+
+  const removeMember = (id: string) => {
+    if (id === "me") return;
+    setDraft((d) => ({ ...d, memberIds: (d.memberIds || []).filter((m) => m !== id) }));
+  };
+
+  const addMembers = async () => {
+    const ids = Array.from(selectedAdd);
+    if (!mesh.client || ids.length === 0) return;
+    // Invite each user via Matrix API
+    for (const userId of ids) {
+      try {
+        await mesh.client.invite(chat.id, userId);
+      } catch (err) {
+        console.error(`Failed to invite ${userId}:`, err);
+      }
+    }
+    setDraft((d) => ({ ...d, memberIds: [...(d.memberIds || []), ...ids] }));
+    setSelectedAdd(new Set());
+    setMemberSearch("");
+    setServerSearchResults([]);
+    setPage("members");
+  };
+
+  const addTopic = (name: string, icon: string) => {
+    const t: Topic = { id: `topic-${Date.now()}`, name, icon, messageCount: 0, lastMessage: "Created", lastMessageTime: "now" };
+    setDraft((d) => ({ ...d, topics: [...(d.topics || []), t] }));
+  };
+
+  const deleteTopic = (id: string) => {
+    setDraft((d) => ({ ...d, topics: (d.topics || []).filter((t) => t.id !== id) }));
+  };
+
+  const goBack = () => {
+    if (page !== "main") setPage("main");
+    else onClose();
+  };
+
+  const isInAnyFolder = folders.some((f) => f.chatIds.includes(chat.id));
+
+  const toggleFolderForChat = (folderId: string) => {
+    onFoldersChange(folders.map((f) => {
+      if (f.id !== folderId) return f;
+      const has = f.chatIds.includes(chat.id);
+      return { ...f, chatIds: has ? f.chatIds.filter((id) => id !== chat.id) : [...f.chatIds, chat.id] };
+    }));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in-up" onClick={onClose}>
+      <div className="absolute inset-0 bg-background/70 backdrop-blur-sm" />
+      <div onClick={(e) => e.stopPropagation()} className="relative w-full max-w-md rounded-3xl glass-strong border border-border/60 shadow-elegant max-h-[90vh] flex flex-col overflow-hidden">
+        <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarPick} />
+
+        {/* Header */}
+        <div className="flex items-center gap-3 px-6 py-4 border-b border-border/40">
+          <button onClick={goBack} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
+            {page === "main" ? <X className="h-4 w-4 text-muted-foreground" /> : <ArrowLeft className="h-4 w-4 text-muted-foreground" />}
+          </button>
+          <h2 className="text-lg font-serif italic gradient-text flex-1">
+            {page === "main" ? (isChannel ? "Channel Settings" : "Group Settings") :
+             page === "members" ? "Members" :
+             page === "addMembers" ? "Add Members" :
+             page === "privacy" ? "Privacy" :
+             page === "invite" ? "Invite Link" :
+             page === "slowmode" ? "Slow Mode" :
+             page === "log" ? "Action Log" :
+             page === "welcome" ? "Welcome Message" :
+             page === "favorites" ? "Add to Favorites" : "Topics"}
+          </h2>
+          {page === "main" && (
+            <button onClick={handleSave} className="text-xs font-semibold text-primary hover:underline">Save</button>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto scrollbar-thin p-6">
+
+          {/* ===== MAIN ===== */}
+          {page === "main" && (
+            <div className="space-y-5">
+              {/* Avatar + Name */}
+              <div className="flex flex-col items-center gap-3">
+                <div className="relative cursor-pointer active:scale-95 transition-transform" onClick={() => fileRef.current?.click()}>
+                  {draft.avatarUrl ? (
+                    <img src={draft.avatarUrl} alt="" className="h-20 w-20 rounded-3xl object-cover border-2 border-primary/30 shadow-glow" />
+                  ) : (
+                    <div className={`flex h-20 w-20 items-center justify-center rounded-3xl text-xl font-bold shadow-glow ${
+                      isChannel ? "bg-gradient-to-br from-accent/30 to-accent/10 text-accent border border-accent/20" : "bg-gradient-to-br from-primary/30 to-primary-glow/10 text-primary border border-primary/20"
+                    }`}>
+                      {draft.avatar}
+                    </div>
+                  )}
+                  <div className="absolute inset-0 flex items-center justify-center rounded-3xl bg-black/30">
+                    <Camera className="h-6 w-6 text-white" />
+                  </div>
+                </div>
+                <button onClick={() => fileRef.current?.click()} className="text-xs font-medium text-primary hover:underline px-3 py-1 rounded-lg hover:bg-primary/10">📷 Change Photo</button>
+                {draft.avatarUrl && (
+                  <button onClick={handleRemoveGroupAvatar} className="text-xs font-medium text-destructive hover:underline px-3 py-1 rounded-lg hover:bg-destructive/10">🗑️ Remove Photo</button>
+                )}
+              </div>
+
+              {/* Name */}
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Name</label>
+                <input type="text" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                  className="w-full rounded-2xl glass border border-border/50 px-4 py-3 text-sm text-foreground outline-none focus:border-primary/50 focus:shadow-glow transition-all bg-transparent" />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground mb-1.5 block">Description</label>
+                <textarea value={draft.description || ""} onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))} rows={2}
+                  className="w-full rounded-2xl glass border border-border/50 px-4 py-3 text-sm text-foreground outline-none focus:border-primary/50 focus:shadow-glow transition-all bg-transparent resize-none" />
+              </div>
+
+              {/* Menu */}
+              <div className="space-y-1">
+                <MenuItem icon={<Star className={`h-4 w-4 ${isInAnyFolder ? "text-primary" : ""}`} />} label={isInAnyFolder ? "In Favorites" : "Add to Favorites"} sub="Save to a folder" onClick={() => setPage("favorites")} />
+                <MenuItem icon={<Users className="h-4 w-4" />} label="Members" sub={`${memberList.length} members`} onClick={() => setPage("members")} />
+                <MenuItem icon={<Link2 className="h-4 w-4" />} label="Invite Link" sub="Share or QR code" onClick={() => setPage("invite")} />
+                <MenuItem icon={<Clock className="h-4 w-4" />} label="Slow Mode" sub="Limit message frequency" onClick={() => setPage("slowmode")} />
+                <MenuItem icon={<Shield className="h-4 w-4" />} label="Action Log" sub="Who did what" onClick={() => setPage("log")} />
+                <MenuItem icon={<Hash className="h-4 w-4" />} label="Welcome Message" sub="Auto-greet new members" onClick={() => setPage("welcome" as Page)} />
+                <MenuItem icon={<Shield className="h-4 w-4" />} label="Privacy" sub="Permissions & access" onClick={() => setPage("privacy")} />
+                <MenuItem icon={muted ? <BellOff className="h-4 w-4" /> : <Bell className="h-4 w-4" />} label={muted ? "Unmute" : "Mute"} onClick={() => setMuted((m) => !m)} />
+              </div>
+
+              {/* Danger */}
+              <div className="pt-3 border-t border-border/40 space-y-1">
+                <MenuItem icon={<LogOut className="h-4 w-4 text-destructive" />} label={isChannel ? "Leave Channel" : "Leave Group"} labelClass="text-destructive" onClick={onClose} />
+                <MenuItem icon={<Trash2 className="h-4 w-4 text-destructive" />} label={isChannel ? "Delete Channel" : "Delete Group"} labelClass="text-destructive" onClick={() => { if (window.confirm(`Are you sure you want to delete "${chat.name}"? This cannot be undone.`)) { onDeleteChat(chat.id); onClose(); } }} />
+              </div>
+            </div>
+          )}
+
+          {/* ===== MEMBERS ===== */}
+          {page === "members" && (
+            <div className="space-y-3">
+              <button onClick={() => setPage("addMembers")} className="flex w-full items-center gap-3 rounded-2xl border border-dashed border-primary/40 px-3 py-3 text-sm font-medium text-primary hover:bg-primary/5 transition-all">
+                <UserPlus className="h-4 w-4" /> Add Members
+              </button>
+              {memberList.map((m) => m && (
+                <div key={m.id} className="flex items-center gap-3 rounded-2xl px-3 py-2.5">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-secondary to-muted text-xs font-bold text-foreground border border-border">{m.avatar}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-sm font-medium text-foreground">{m.name}{m.id === "me" ? " (you)" : ""}</p>
+                      {m.id === "me" && (
+                        <span className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30">Admin</span>
+                      )}
+                      {m.id !== "me" && memberList.indexOf(m) === 1 && (
+                        <span className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-accent/20 text-accent border border-accent/30">Mod</span>
+                      )}
+                    </div>
+                    {m.online && <span className="text-[10px] text-online">online</span>}
+                  </div>
+                  {m.id !== "me" && (
+                    <button onClick={() => removeMember(m.id)} className="rounded-lg p-1.5 hover:bg-destructive/10 transition-colors" title="Remove">
+                      <UserMinus className="h-4 w-4 text-destructive" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ===== ADD MEMBERS ===== */}
+          {page === "addMembers" && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2.5 rounded-2xl glass border border-border/50 px-4 py-2.5 focus-within:border-primary/50 focus-within:shadow-glow transition-all">
+                <Search className="h-4 w-4 text-muted-foreground" />
+                <input type="text" placeholder="Search by username or ID..." value={memberSearch}
+                  onChange={async (e) => {
+                    const q = e.target.value;
+                    setMemberSearch(q);
+                    if (q.length < 2) { setServerSearchResults([]); return; }
+                    // Search users on server
+                    try {
+                      const users = await mesh.searchUsers(q);
+                      const currentMembers = new Set(draft.memberIds || []);
+                      setServerSearchResults(
+                        users
+                          .filter((u) => u.userId !== mesh.userId && !currentMembers.has(u.userId))
+                          .map((u) => ({
+                            id: u.userId,
+                            name: u.displayName || u.userId,
+                            avatar: (u.displayName || "?").split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2),
+                          }))
+                      );
+                    } catch { setServerSearchResults([]); }
+                  }}
+                  autoFocus
+                  className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none" />
+              </div>
+              {memberSearch.length < 2 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">Type at least 2 characters to search</p>
+              ) : serverSearchResults.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">No users found</p>
+              ) : (
+                serverSearchResults.map((c) => {
+                  const sel = selectedAdd.has(c.id);
+                  return (
+                    <button key={c.id} onClick={() => setSelectedAdd((prev) => { const n = new Set(prev); sel ? n.delete(c.id) : n.add(c.id); return n; })}
+                      className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-all ${sel ? "bg-primary/10 border border-primary/30" : "hover:bg-surface-hover border border-transparent"}`}>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-secondary to-muted text-xs font-bold text-foreground border border-border">{c.avatar}</div>
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-foreground">{c.name}</p>
+                        <p className="text-[10px] text-muted-foreground">{c.id}</p>
+                      </div>
+                      <div className={`flex h-6 w-6 items-center justify-center rounded-full transition-all ${sel ? "gradient-primary" : "border border-border/60"}`}>
+                        {sel && <Check className="h-3.5 w-3.5 text-primary-foreground" />}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+              {selectedAdd.size > 0 && (
+                <button onClick={addMembers} className="w-full rounded-2xl py-3 text-sm font-semibold gradient-primary text-primary-foreground shadow-glow hover:scale-[1.02] transition-all">
+                  Add {selectedAdd.size} member{selectedAdd.size > 1 ? "s" : ""}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* ===== PRIVACY ===== */}
+          {page === "privacy" && (
+            <div className="space-y-4">
+              <p className="text-xs text-muted-foreground">Control who can access this {isChannel ? "channel" : "group"}.</p>
+
+              {/* Visibility */}
+              <div>
+                <p className="text-[9px] font-mono uppercase text-muted-foreground mb-2">Visibility</p>
+                <div className="space-y-1.5">
+                  {[
+                    { id: "public", label: "Public", desc: "Anyone can find and join" },
+                    { id: "private", label: "Private", desc: "Only via invite link" },
+                    { id: "hidden", label: "Hidden", desc: "Not visible in search" },
+                  ].map((opt) => (
+                    <button key={opt.id} onClick={() => {
+                      if (mesh.client) {
+                        const joinRule = opt.id === "public" ? "public" : "invite";
+                        mesh.client.sendStateEvent(chat.id, "m.room.join_rules", { join_rule: joinRule }, "").catch(() => {});
+                        mesh.client.sendStateEvent(chat.id, "org.nexalink.space", {
+                          type: isChannel ? "channel" : "group",
+                          visibility: opt.id,
+                          access: opt.id === "public" ? "open" : "invite-only",
+                        }, "").catch(() => {});
+                      }
+                    }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 border border-border/30 hover:bg-surface-hover text-left transition-all">
+                      <div className="flex-1">
+                        <p className="text-xs font-medium text-foreground">{opt.label}</p>
+                        <p className="text-[10px] text-muted-foreground">{opt.desc}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Access */}
+              <div>
+                <p className="text-[9px] font-mono uppercase text-muted-foreground mb-2">Who can join</p>
+                <div className="space-y-1.5">
+                  {[
+                    { id: "open", label: "Open", desc: "Anyone can join without approval" },
+                    { id: "approval", label: "Approval required", desc: "Admin must approve requests" },
+                    { id: "invite-only", label: "Invite only", desc: "Only invited users can join" },
+                  ].map((opt) => (
+                    <button key={opt.id} onClick={() => {
+                      if (mesh.client) {
+                        mesh.client.sendStateEvent(chat.id, "org.nexalink.space", {
+                          type: isChannel ? "channel" : "group",
+                          access: opt.id,
+                        }, "").catch(() => {});
+                        if (opt.id === "invite-only") {
+                          mesh.client.sendStateEvent(chat.id, "m.room.join_rules", { join_rule: "invite" }, "").catch(() => {});
+                        }
+                      }
+                    }} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 border border-border/30 hover:bg-surface-hover text-left transition-all">
+                      <div className="flex-1">
+                        <p className="text-xs font-medium text-foreground">{opt.label}</p>
+                        <p className="text-[10px] text-muted-foreground">{opt.desc}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Permissions */}
+              <div>
+                <p className="text-[9px] font-mono uppercase text-muted-foreground mb-2">Permissions</p>
+                <div className="space-y-1.5">
+                  <PrivacyRow label="Who can send messages" value={isChannel ? "Admins only" : "All members"} />
+                  <PrivacyRow label="Who can add members" value="All members" />
+                  <PrivacyRow label="Who can edit info" value="Admins only" />
+                  <PrivacyRow label="Who can pin messages" value="Admins only" />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-primary/5 border border-primary/10 mt-4">
+                <Lock className="h-4 w-4 text-primary flex-shrink-0" />
+                <p className="text-[11px] text-muted-foreground">All messages are end-to-end encrypted</p>
+              </div>
+            </div>
+          )}
+
+          {/* ===== INVITE LINK ===== */}
+          {page === "invite" && (
+            <div className="space-y-4">
+              <p className="text-xs text-muted-foreground">Share this link to invite people to the {isChannel ? "channel" : "group"}.</p>
+              <div className="rounded-2xl glass border border-border/40 p-4">
+                <p className="text-[9px] font-mono uppercase text-muted-foreground mb-2">Invite Link</p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 text-xs text-foreground bg-secondary/50 rounded-xl px-3 py-2 truncate">
+                    https://nexalink.app/join/{chat.id.slice(1, 12)}
+                  </code>
+                  <button
+                    onClick={() => navigator.clipboard?.writeText(`https://nexalink.app/join/${chat.id.slice(1, 12)}`)}
+                    className="p-2 rounded-xl hover:bg-surface-hover"
+                    title="Copy link"
+                  >
+                    <Copy className="h-4 w-4 text-primary" />
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-2xl glass border border-border/40 p-4 flex flex-col items-center">
+                <p className="text-[9px] font-mono uppercase text-muted-foreground mb-3">QR Code</p>
+                <div className="w-40 h-40 rounded-2xl bg-white flex items-center justify-center border border-border/30">
+                  {/* Simple QR-like pattern using CSS grid */}
+                  <div className="grid grid-cols-7 gap-0.5 p-3">
+                    {Array.from({ length: 49 }).map((_, i) => {
+                      const isCorner = (i < 3 || (i > 3 && i < 7)) && (Math.floor(i / 7) < 3);
+                      const rand = Math.random() > 0.5;
+                      return (
+                        <div key={i} className={`w-3.5 h-3.5 rounded-sm ${isCorner || rand ? "bg-black" : "bg-white"}`} />
+                      );
+                    })}
+                  </div>
+                </div>
+                <p className="text-[9px] text-muted-foreground mt-2">Scan to join</p>
+              </div>
+            </div>
+          )}
+
+          {/* ===== SLOW MODE ===== */}
+          {page === "slowmode" && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Limit how often members can send messages.</p>
+              {[
+                { label: "Off", value: 0 },
+                { label: "10 seconds", value: 10 },
+                { label: "30 seconds", value: 30 },
+                { label: "1 minute", value: 60 },
+                { label: "5 minutes", value: 300 },
+                { label: "15 minutes", value: 900 },
+              ].map((opt) => (
+                <button key={opt.value} className="w-full text-left rounded-xl px-3 py-2.5 border border-border/30 hover:bg-surface-hover transition-all">
+                  <p className="text-xs font-medium text-foreground">{opt.label}</p>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* ===== ACTION LOG ===== */}
+          {page === "log" && (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground mb-3">Recent actions in this {isChannel ? "channel" : "group"}.</p>
+              {[
+                { action: "Group created", by: "You", time: "Today" },
+                { action: "Settings updated", by: "You", time: "Today" },
+              ].map((entry, i) => (
+                <div key={i} className="flex items-center gap-3 rounded-xl px-3 py-2 bg-secondary/30">
+                  <Clock className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-xs text-foreground">{entry.action}</p>
+                    <p className="text-[10px] text-muted-foreground">{entry.by} · {entry.time}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ===== WELCOME MESSAGE ===== */}
+          {page === "welcome" && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Set a message that new members see when they join.</p>
+              <textarea
+                defaultValue={`Welcome to ${chat.name}! 👋\nPlease read the rules and introduce yourself.`}
+                rows={4}
+                className="w-full rounded-xl glass border border-border/50 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary/50 bg-transparent resize-none"
+              />
+              <button className="w-full rounded-xl py-2.5 text-xs font-medium gradient-primary text-primary-foreground shadow-glow">
+                Save Welcome Message
+              </button>
+            </div>
+          )}
+
+          {/* ===== TOPICS ===== */}
+          {page === "topics" && (
+            <TopicsPage topics={draft.topics || []} onAdd={addTopic} onDelete={deleteTopic} />
+          )}
+
+          {/* ===== FAVORITES ===== */}
+          {page === "favorites" && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Choose which folders to add this {isChannel ? "channel" : "group"} to:</p>
+              {folders.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">No folders yet. Create one in the Favorites tab.</p>
+              ) : (
+                folders.map((f) => {
+                  const inFolder = f.chatIds.includes(chat.id);
+                  return (
+                    <button key={f.id} onClick={() => toggleFolderForChat(f.id)}
+                      className={`flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition-all ${inFolder ? "bg-primary/10 border border-primary/30 shadow-glow" : "hover:bg-surface-hover border border-transparent"}`}>
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${inFolder ? "gradient-primary" : "bg-secondary/80"}`}>
+                        <Star className={`h-4 w-4 ${inFolder ? "text-primary-foreground" : "text-muted-foreground"}`} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground">{f.name}</p>
+                        <p className="text-[10px] text-muted-foreground">{f.chatIds.length} items</p>
+                      </div>
+                      <div className={`flex h-6 w-6 items-center justify-center rounded-full transition-all ${inFolder ? "gradient-primary" : "border border-border/60"}`}>
+                        {inFolder && <Check className="h-3.5 w-3.5 text-primary-foreground" />}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MenuItem({ icon, label, sub, labelClass, onClick }: { icon: React.ReactNode; label: string; sub?: string; labelClass?: string; onClick?: () => void }) {
+  return (
+    <button onClick={onClick} className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left hover:bg-surface-hover transition-all">
+      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-secondary/80 text-muted-foreground">{icon}</div>
+      <div className="flex-1 min-w-0">
+        <p className={`text-sm font-medium ${labelClass || "text-foreground"}`}>{label}</p>
+        {sub && <p className="text-[11px] text-muted-foreground">{sub}</p>}
+      </div>
+      {onClick && !labelClass && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+    </button>
+  );
+}
+
+function PrivacyRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-2xl px-3 py-3 hover:bg-surface-hover transition-all">
+      <p className="text-sm text-foreground">{label}</p>
+      <p className="text-xs text-muted-foreground">{value}</p>
+    </div>
+  );
+}
+
+const ICONS = ["#", "📢", "💡", "🔧", "🎨", "📊", "🚀", "❓", "📝", "🔒"];
+
+function TopicsPage({ topics, onAdd, onDelete }: { topics: Topic[]; onAdd: (name: string, icon: string) => void; onDelete: (id: string) => void }) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [icon, setIcon] = useState("#");
+
+  const handleAdd = () => {
+    if (!name.trim()) return;
+    onAdd(name.trim(), icon);
+    setName(""); setIcon("#"); setAdding(false);
+  };
+
+  return (
+    <div className="space-y-3">
+      {topics.map((t) => (
+        <div key={t.id} className="flex items-center gap-3 rounded-2xl px-3 py-2.5 hover:bg-surface-hover transition-all">
+          <span className="text-lg">{t.icon}</span>
+          <div className="flex-1">
+            <p className="text-sm font-medium text-foreground">{t.name}</p>
+            <p className="text-[10px] text-muted-foreground">{t.messageCount} messages</p>
+          </div>
+          <button onClick={() => onDelete(t.id)} className="rounded-lg p-1.5 hover:bg-destructive/10 transition-colors">
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+          </button>
+        </div>
+      ))}
+
+      {adding ? (
+        <div className="space-y-3 rounded-2xl glass border border-border/50 p-4">
+          <div className="flex flex-wrap gap-2">
+            {ICONS.map((ic) => (
+              <button key={ic} onClick={() => setIcon(ic)} className={`flex h-8 w-8 items-center justify-center rounded-lg text-sm transition-all ${icon === ic ? "gradient-primary text-primary-foreground" : "bg-secondary/60 hover:bg-surface-hover"}`}>{ic}</button>
+            ))}
+          </div>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Topic name" autoFocus onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+            className="w-full rounded-xl glass border border-border/50 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary/50 bg-transparent" />
+          <div className="flex gap-2">
+            <button onClick={() => setAdding(false)} className="flex-1 rounded-xl py-2 text-xs font-medium text-muted-foreground hover:bg-surface-hover border border-border/50">Cancel</button>
+            <button onClick={handleAdd} disabled={!name.trim()} className={`flex-1 rounded-xl py-2 text-xs font-semibold ${name.trim() ? "gradient-primary text-primary-foreground" : "bg-secondary text-muted-foreground"}`}>Create</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setAdding(true)} className="flex w-full items-center gap-2 rounded-2xl border border-dashed border-primary/40 px-3 py-3 text-sm font-medium text-primary hover:bg-primary/5 transition-all">
+          <Plus className="h-4 w-4" /> New Topic
+        </button>
+      )}
+    </div>
+  );
+}

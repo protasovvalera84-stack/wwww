@@ -1,0 +1,186 @@
+# NexaLink Server Configuration — WhatsApp-style hybrid/relay model
+# This file is templated by setup.sh using envsubst.
+# Variables like ${VAR_NAME} are replaced during setup.
+#
+# RELAY MODEL:
+#   Messages live on the server for at most 1 day.
+#   Once all devices have synced, purge jobs remove the events.
+#   Clients (mobile/desktop) store a permanent local copy (IndexedDB / Room DB).
+#   The server is a relay, not a long-term store.
+#   Media is retained for 30 days to allow lazy download on new devices.
+
+server_name: "${SERVER_NAME}"
+
+pid_file: /data/homeserver.pid
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [client, federation]
+        compress: false
+
+# --- Database (PostgreSQL) ---
+database:
+  name: psycopg2
+  args:
+    user: "${POSTGRES_USER}"
+    password: "${POSTGRES_PASSWORD}"
+    database: "${POSTGRES_DB}"
+    host: postgres
+    port: 5432
+    cp_min: 5
+    cp_max: 10
+
+# --- Logging ---
+log_config: /data/log.config
+
+# --- Media storage ---
+media_store_path: /data/media_store
+max_upload_size: 50M
+enable_authenticated_media: false
+url_preview_enabled: true
+url_preview_ip_range_blacklist:
+  - "127.0.0.0/8"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "100.64.0.0/10"
+  - "192.0.0.0/24"
+  - "169.254.0.0/16"
+  - "::1/128"
+  - "fe80::/10"
+  - "fc00::/7"
+
+# --- Registration ---
+enable_registration: ${ENABLE_REGISTRATION}
+enable_registration_without_verification: ${ENABLE_REGISTRATION}
+registration_shared_secret: "${REGISTRATION_SHARED_SECRET}"
+enable_set_displayname: true
+enable_set_avatar_url: true
+
+# --- Room Directory ---
+allow_public_rooms_without_auth: true
+allow_public_rooms_over_federation: false
+
+# --- Security ---
+report_stats: false
+macaroon_secret_key: "${MACAROON_SECRET}"
+form_secret: "${FORM_SECRET}"
+signing_key_path: /data/signing.key
+
+# --- TURN server (for voice/video calls) ---
+turn_uris:
+  - "stun:${SERVER_HOST}:${TURN_PORT}"
+  - "turn:${SERVER_HOST}:${TURN_PORT}?transport=udp"
+  - "turn:${SERVER_HOST}:${TURN_PORT}?transport=tcp"
+turn_shared_secret: "${TURN_SECRET}"
+turn_user_lifetime: 86400000
+turn_allow_guests: true
+
+# --- Rate limiting (relaxed for small deployments) ---
+rc_message:
+  per_second: 5
+  burst_count: 20
+
+rc_login:
+  address:
+    per_second: 1
+    burst_count: 5
+  account:
+    per_second: 1
+    burst_count: 5
+
+# --- User directory ---
+user_directory:
+  enabled: true
+  search_all_users: true
+  prefer_local_users: true
+
+# --- Presence ---
+presence:
+  enabled: true
+
+# --- Push notifications ---
+push:
+  include_content: true
+
+# ============================================================================
+# HYBRID RELAY MODEL — WhatsApp-style message lifecycle
+#
+# Policy:
+#   min_lifetime: 0s     — messages may be deleted as soon as all recipients sync
+#   max_lifetime: 1d     — hard cap: messages vanish from server after 1 day
+#
+# Purge jobs run every 6 hours to keep the server storage lean.
+# Clients must sync within 1 day to receive messages.
+# All clients use local persistence (IndexedDB / Room DB / SQLite) as
+# the permanent archive — the server only holds messages in transit.
+# ============================================================================
+retention:
+  enabled: true
+  # Default policy applied to all rooms unless overridden per-room
+  default_policy:
+    min_lifetime: 0s
+    max_lifetime: 1d
+  # Purge jobs: check and remove expired events frequently
+  purge_jobs:
+    # Rooms with short retention (≤ 1 day) — checked every 6 hours
+    - shortest_max_lifetime: 0s
+      longest_max_lifetime: 1d
+      interval: 6h
+    # Rooms with no explicit policy — also purge after 1 day
+    - longest_max_lifetime: 1d
+      interval: 6h
+
+# ============================================================================
+# MEDIA RETENTION — 30 days on server, then deleted
+# Clients download media to local storage on first view.
+# ============================================================================
+media_retention:
+  local_media_lifetime: 30d
+  remote_media_lifetime: 30d
+
+# --- Forgotten rooms cleanup ---
+forgotten_room_retention_period: 7d
+
+# --- Stale device cleanup ---
+# Remove device records for clients that haven't synced in 30 days.
+# This ensures purge jobs aren't blocked waiting for ghost devices.
+delete_stale_devices_after: 30d
+
+# --- Trusted key servers ---
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+suppress_key_server_warning: true
+
+# --- Metrics (Prometheus) ---
+enable_metrics: true
+
+# --- Redis (caching + worker communication) ---
+redis:
+  enabled: true
+  host: redis
+  port: 6379
+
+# --- Caching ---
+caches:
+  global_factor: 1.0
+  per_cache_factors:
+    get_users_in_room: 2.0
+    get_room_summary: 2.0
+    _get_state_group_for_event: 2.0
+
+# --- Performance ---
+federation_rr_transactions_per_room_per_second: 50
+
+# --- Worker mode (optional, for scaling) ---
+# Uncomment and configure for high-load deployments.
+# instance_map:
+#   main:
+#     host: synapse
+#     port: 8008

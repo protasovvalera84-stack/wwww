@@ -1,0 +1,372 @@
+/**
+ * NexaLink Client
+ *
+ * Core networking layer for the NexaLink social platform.
+ * Handles connection, authentication, rooms, messages, and presence.
+ */
+
+import * as sdk from "matrix-js-sdk";
+import { IndexedDBStore } from "matrix-js-sdk/lib/store/indexeddb";
+
+// Re-export internal types under NexaLink names
+export type MeshClient = sdk.MatrixClient;
+export type MeshRoom = sdk.Room;
+export type MeshEvent = sdk.MatrixEvent;
+export type MeshMember = sdk.RoomMember;
+
+export interface NexaLinkSession {
+  userId: string;
+  accessToken: string;
+  deviceId: string;
+  homeserverUrl: string;
+}
+
+const SESSION_KEY = "nexalink-session";
+
+/** Get the server URL (same origin in production). */
+function getServerUrl(): string {
+  return window.location.origin;
+}
+
+/** Store session to localStorage. */
+export function saveSession(session: NexaLinkSession): void {
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+}
+
+/** Load session from localStorage. */
+export function loadSession(): NexaLinkSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** Clear session and clean up stored data. */
+export function clearSession(): void {
+  localStorage.removeItem(SESSION_KEY);
+}
+
+/** Full logout: invalidate token on server, clear local data. */
+export async function logoutAccount(session: NexaLinkSession): Promise<void> {
+  // Invalidate access token on server
+  try {
+    await fetch(`${session.homeserverUrl}/_matrix/client/v3/logout`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${session.accessToken}` },
+    });
+  } catch {
+    // Server may be unreachable, continue with local cleanup
+  }
+
+  // Clear IndexedDB sync store
+  try {
+    const dbName = "nexalink-sync-" + session.userId;
+    window.indexedDB.deleteDatabase(dbName);
+  } catch {
+    // Non-critical
+  }
+
+  clearSession();
+}
+
+/** Create an authenticated client. Tries IndexedDB store, falls back to memory. */
+export async function createClientWithStore(session: NexaLinkSession): Promise<MeshClient> {
+  // Try IndexedDB for persistent storage
+  try {
+    if (window.indexedDB) {
+      const store = new IndexedDBStore({
+        indexedDB: window.indexedDB,
+        dbName: "nexalink-sync-" + session.userId,
+        localStorage: window.localStorage,
+      });
+      // Create client first, then startup store (SDK requirement)
+      const client = sdk.createClient({
+        baseUrl: session.homeserverUrl,
+        accessToken: session.accessToken,
+        userId: session.userId,
+        deviceId: session.deviceId,
+        store,
+        timelineSupport: true,
+        pendingEventOrdering: "detached" as any,
+      });
+      await store.startup();
+      console.log("Using IndexedDB store for persistent sync");
+      return client;
+    }
+  } catch (err) {
+    console.warn("IndexedDB store failed, using memory store:", err);
+  }
+
+  // Fallback: in-memory store (works everywhere but loses data on reload)
+  return sdk.createClient({
+    baseUrl: session.homeserverUrl,
+    accessToken: session.accessToken,
+    userId: session.userId,
+    deviceId: session.deviceId,
+    pendingEventOrdering: "detached" as any,
+  });
+}
+
+/** Create an authenticated client (in-memory, for quick operations). */
+export function createClient(session: NexaLinkSession): MeshClient {
+  return sdk.createClient({
+    baseUrl: session.homeserverUrl,
+    accessToken: session.accessToken,
+    userId: session.userId,
+    deviceId: session.deviceId,
+    pendingEventOrdering: "detached" as any,
+  });
+}
+
+/** Create an unauthenticated client (for registration/login). */
+export function createAnonClient(): MeshClient {
+  return sdk.createClient({ baseUrl: getServerUrl() });
+}
+
+/**
+ * Register a new NexaLink account.
+ * Uses raw fetch for reliability (SDK registerRequest has inconsistent error handling).
+ */
+export async function registerAccount(
+  username: string,
+  password: string,
+  displayName: string,
+): Promise<NexaLinkSession> {
+  const homeserverUrl = getServerUrl();
+  const registerUrl = `${homeserverUrl}/_matrix/client/v3/register`;
+
+  // Step 1: Get auth session
+  const initResp = await fetch(registerUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+
+  const initData = await initResp.json();
+
+  // If server returned an error (not 401 auth flow)
+  if (!initResp.ok && initResp.status !== 401) {
+    throw new Error(initData.error || `Registration failed (${initResp.status})`);
+  }
+
+  // If registration succeeded without auth (unlikely but handle it)
+  if (initResp.ok && initData.access_token) {
+    const session: NexaLinkSession = {
+      userId: initData.user_id,
+      accessToken: initData.access_token,
+      deviceId: initData.device_id,
+      homeserverUrl,
+    };
+    await trySetDisplayName(session, displayName);
+    saveSession(session);
+    return session;
+  }
+
+  // Step 2: Complete registration with dummy auth
+  const authSession = initData.session;
+  if (!authSession) {
+    throw new Error("Server did not return auth session. Registration may be disabled.");
+  }
+
+  const regResp = await fetch(registerUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username,
+      password,
+      initial_device_display_name: "NexaLink",
+      auth: {
+        type: "m.login.dummy",
+        session: authSession,
+      },
+    }),
+  });
+
+  const regData = await regResp.json();
+
+  if (!regResp.ok) {
+    throw new Error(regData.error || `Registration failed (${regResp.status})`);
+  }
+
+  const session: NexaLinkSession = {
+    userId: regData.user_id,
+    accessToken: regData.access_token,
+    deviceId: regData.device_id,
+    homeserverUrl,
+  };
+
+  await trySetDisplayName(session, displayName);
+  saveSession(session);
+  return session;
+}
+
+/** Set display name (non-critical, don't throw). */
+async function trySetDisplayName(session: NexaLinkSession, displayName: string): Promise<void> {
+  if (!displayName) return;
+  try {
+    await fetch(
+      `${session.homeserverUrl}/_matrix/client/v3/profile/${encodeURIComponent(session.userId)}/displayname`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.accessToken}`,
+        },
+        body: JSON.stringify({ displayname: displayName }),
+      },
+    );
+  } catch {
+    /* non-critical */
+  }
+}
+
+/** Log in to an existing NexaLink account. */
+export async function loginAccount(
+  username: string,
+  password: string,
+): Promise<NexaLinkSession> {
+  const homeserverUrl = getServerUrl();
+
+  const resp = await fetch(`${homeserverUrl}/_matrix/client/v3/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: "m.login.password",
+      identifier: { type: "m.id.user", user: username },
+      password,
+      initial_device_display_name: "NexaLink",
+    }),
+  });
+
+  const data = await resp.json();
+
+  if (!resp.ok) {
+    throw new Error(data.error || `Login failed (${resp.status})`);
+  }
+
+  const session: NexaLinkSession = {
+    userId: data.user_id,
+    accessToken: data.access_token,
+    deviceId: data.device_id,
+    homeserverUrl,
+  };
+
+  saveSession(session);
+  return session;
+}
+
+/** Start the client (sync with server). Resolves when ready or on timeout. */
+export async function startClient(client: MeshClient): Promise<boolean> {
+  try {
+    await client.startClient({ initialSyncLimit: 10 });
+  } catch (err) {
+    console.error("Failed to start Matrix client:", err);
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      console.warn("Sync timeout after 20s, proceeding with available data");
+      client.removeListener(sdk.ClientEvent.Sync, onSync);
+      resolve(true); // Still resolve -- partial data is better than stuck
+    }, 20000);
+
+    const onSync = (state: string, _prev: string | null, data?: { error?: Error }) => {
+      if (state === "PREPARED") {
+        clearTimeout(timeout);
+        client.removeListener(sdk.ClientEvent.Sync, onSync);
+        console.log("Matrix sync ready");
+        resolve(true);
+      } else if (state === "ERROR") {
+        console.error("Matrix sync error:", data?.error);
+        // Don't resolve yet -- might recover
+      } else if (state === "RECONNECTING") {
+        console.warn("Matrix sync reconnecting...");
+      }
+    };
+    client.on(sdk.ClientEvent.Sync, onSync);
+  });
+}
+
+/** Stop the client. */
+export function stopClient(client: MeshClient): void {
+  client.stopClient();
+}
+
+/** Get display name for a user. */
+export function getUserDisplayName(client: MeshClient, userId: string): string {
+  const user = client.getUser(userId);
+  return user?.displayName || userId.split(":")[0].replace("@", "");
+}
+
+/** Get initials from a display name. */
+export function getInitials(name: string): string {
+  return name
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2) || "??";
+}
+
+/** Check if NexaLink server is reachable. */
+export async function checkServer(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const resp = await fetch(`${getServerUrl()}/_matrix/client/versions`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return resp.ok;
+  } catch (err) {
+    console.warn("Server check failed:", err);
+    return false;
+  }
+}
+
+/** Upload a file to the server. Returns the mxc:// URI. */
+export async function uploadMedia(
+  accessToken: string,
+  file: File,
+): Promise<string> {
+  const resp = await fetch(`${getServerUrl()}/_matrix/media/v3/upload?filename=${encodeURIComponent(file.name)}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: file,
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error || `Upload failed (${resp.status})`);
+  }
+
+  const data = await resp.json();
+  return (data as { content_uri: string }).content_uri;
+}
+
+/** Convert an mxc:// URI to an HTTP URL for display. */
+export function mxcToUrl(mxcUri: string): string {
+  if (!mxcUri || !mxcUri.startsWith("mxc://")) return mxcUri;
+  const parts = mxcUri.replace("mxc://", "").split("/");
+  if (parts.length < 2) return mxcUri;
+  const serverName = parts[0];
+  const mediaId = parts.slice(1).join("/");
+  return `${getServerUrl()}/_matrix/media/v3/download/${serverName}/${mediaId}`;
+}
+
+/** Convert an mxc:// URI to a thumbnail URL. */
+export function mxcToThumbnail(mxcUri: string, width = 640, height = 480): string {
+  if (!mxcUri || !mxcUri.startsWith("mxc://")) return mxcUri;
+  const parts = mxcUri.replace("mxc://", "").split("/");
+  if (parts.length < 2) return mxcUri;
+  const serverName = parts[0];
+  const mediaId = parts.slice(1).join("/");
+  return `${getServerUrl()}/_matrix/media/v3/thumbnail/${serverName}/${mediaId}?width=${width}&height=${height}&method=scale`;
+}

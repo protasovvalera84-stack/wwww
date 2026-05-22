@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="camera" path=".nexalink_camera/" />
+    <files-path name="media" path=".nexalink_media/" />
+    <files-path name="voice" path=".nexalink_voice/" />
+    <cache-path name="cache" path="." />
+</paths>

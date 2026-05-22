@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <application
+        android:name=".NexaLinkApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="NexaLink"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NexaLink"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="false">
+
+        <!-- WebView UI — identical to web version -->
+        <activity
+            android:name=".ui.WebViewActivity"
+            android:exported="true"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Native login (fallback) -->
+        <activity
+            android:name=".ui.LoginActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize">
+        </activity>
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ui.ChatActivity"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ui.ShortsActivity"
+            android:screenOrientation="unspecified" />
+
+        <activity
+            android:name=".ui.CallActivity"
+            android:screenOrientation="unspecified"
+            android:configChanges="orientation|screenSize" />
+
+        <activity
+            android:name=".ui.CreateChatActivity"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ui.ProfileActivity"
+            android:screenOrientation="unspecified" />
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:screenOrientation="unspecified" />
+
+        <activity android:name=".ui.VideoActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.MusicActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.MarketActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.ContactsActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.ShortsFullActivity" android:screenOrientation="portrait" android:theme="@style/Theme.NexaLink" />
+        <activity android:name=".ui.MusicPlayerActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.GroupSettingsActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.MarketFullActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.SearchActivity" android:screenOrientation="unspecified" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".ui.ImageViewerActivity" android:screenOrientation="unspecified" android:theme="@style/Theme.NexaLink" />
+        <activity android:name=".ui.AboutActivity" android:screenOrientation="unspecified" />
+        <activity android:name=".ui.FileShareActivity" android:exported="true" android:screenOrientation="unspecified">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
+
+        <service
+            android:name=".network.SyncService"
+            android:exported="false" />
+
+    </application>
+</manifest>
