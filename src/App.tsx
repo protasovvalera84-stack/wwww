@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import Index from "./pages/Index.tsx";
 import RegisterPage from "./pages/Register.tsx";
 import NotFound from "./pages/NotFound.tsx";
+import { LandingPage } from "./pages/LandingPage.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { UserProfile, defaultProfile } from "@/data/mockData";
 import { PlatformId } from "@/data/languages";
@@ -39,6 +40,8 @@ const App = () => {
   const [deviceBlocked, setDeviceBlocked] = useState(false);
   const [recoveryWords, setRecoveryWords] = useState<string[] | null>(null);
   const [showRecoverySetup, setShowRecoverySetup] = useState(false);
+  // Landing page: null = show landing, "register" = show register, "login" = show login
+  const [authView, setAuthView] = useState<null | "register" | "login">(null);
 
   // Device security check after session loads
   useEffect(() => {
@@ -127,6 +130,7 @@ const App = () => {
     setRegistered(false);
     setProfile(defaultProfile);
     setSession(null);
+    setAuthView(null); // back to landing after logout
   };
 
   // Persist profile changes from settings
@@ -171,8 +175,18 @@ const App = () => {
                 </BrowserRouter>
               </MeshProvider>
             )
+          ) : authView === null ? (
+            /* Show landing page to unauthenticated visitors */
+            <LandingPage
+              onGetStarted={() => setAuthView("register")}
+              onSignIn={() => setAuthView("login")}
+            />
           ) : (
-            <RegisterPage onComplete={handleRegisterComplete} />
+            <RegisterPage
+              onComplete={handleRegisterComplete}
+              defaultView={authView === "login" ? "login" : "register"}
+              onBack={() => setAuthView(null)}
+            />
           )}
         </TooltipProvider>
       </ThemeProvider>

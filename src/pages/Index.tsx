@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
-import { ChatSidebar, type SearchResult } from "@/components/ChatSidebar";
-import { ChatView } from "@/components/ChatView";
+import { NexaSidebar, type SearchResult } from "@/components/NexaSidebar";
+import { NexaConversation } from "@/components/NexaConversation";
 import { EmptyChat } from "@/components/EmptyChat";
 import { AccountSettings } from "@/components/AccountSettings";
 import { CallScreen, IncomingCallBanner, CallType } from "@/components/CallScreen";
@@ -500,108 +500,118 @@ const Index = ({ initialProfile, onProfileChange, onLogout }: IndexProps = {}) =
   }
 
   return (
-    <div className="flex flex-col h-[100dvh] w-full overflow-hidden">
+    <div className="flex flex-col h-[100dvh] w-full overflow-hidden bg-background">
       {/* Connection status bar */}
       <ConnectionStatus />
       <KeyboardShortcuts />
       <PwaInstallBanner />
+
+      {/* ── Main layout: sidebar + conversation ── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-      <div className={`${sidebarOpen ? "flex" : "hidden"} md:flex w-full md:w-auto flex-shrink-0`}>
-        <ErrorBoundary fallbackTitle="Sidebar error">
-        <ChatSidebar
-          chats={chatList}
-          stories={stories}
-          profile={profile}
-          folders={folders}
-          selectedChatId={selectedChatId}
-          onSelectChat={handleSelectChat}
-          onCreateChat={handleCreateChat}
-          onAddStory={handleAddStory}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onFoldersChange={setFolders}
-          onSearch={handleSearch}
-          onStartDm={handleStartDm}
-          onJoinRoom={handleJoinRoom}
-        />
-        </ErrorBoundary>
-      </div>
-      <div className={`${!sidebarOpen ? "flex" : "hidden"} md:flex flex-1 min-w-0`}>
-        <ErrorBoundary fallbackTitle="Chat error">
-        {selectedChat ? (
-          <ChatView
+
+        {/* ── NexaLink Sidebar ── */}
+        <div
+          className={`${sidebarOpen ? "flex" : "hidden"} md:flex flex-col flex-shrink-0 border-r border-border/20`}
+          style={{ width: "clamp(280px, 30vw, 380px)" }}
+        >
+          <ErrorBoundary fallbackTitle="Sidebar error">
+            <NexaSidebar
+              chats={chatList}
+              stories={stories}
+              profile={profile}
+              folders={folders}
+              selectedChatId={selectedChatId}
+              onSelectChat={handleSelectChat}
+              onCreateChat={handleCreateChat}
+              onAddStory={handleAddStory}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onFoldersChange={setFolders}
+              onSearch={handleSearch}
+              onStartDm={handleStartDm}
+              onJoinRoom={handleJoinRoom}
+            />
+          </ErrorBoundary>
+        </div>
+
+        {/* ── NexaConversation ── */}
+        <div className={`${!sidebarOpen ? "flex" : "hidden"} md:flex flex-1 min-w-0 flex-col`}>
+          <ErrorBoundary fallbackTitle="Chat error">
+            {selectedChat ? (
+              <NexaConversation
+                chat={selectedChat}
+                onSendMessage={handleSendMessage}
+                onBack={handleBack}
+                onCall={selectedChat.type !== "channel" ? handleCall : undefined}
+                onCreateTopic={handleCreateTopic}
+                onDeleteTopic={handleDeleteTopic}
+                onSettingsClick={
+                  selectedChat.type === "group" || selectedChat.type === "channel"
+                    ? () => setGroupSettingsOpen(true)
+                    : undefined
+                }
+                onDmSettingsClick={
+                  selectedChat.type === "dm" ? () => setDmSettingsOpen(true) : undefined
+                }
+              />
+            ) : (
+              <EmptyChat />
+            )}
+          </ErrorBoundary>
+        </div>
+
+        {/* ── Dialogs / overlays (keep all existing) ── */}
+        {selectedChat && (selectedChat.type === "group" || selectedChat.type === "channel") && (
+          <GroupSettingsDialog
+            open={groupSettingsOpen}
             chat={selectedChat}
-            onSendMessage={handleSendMessage}
-            onBack={handleBack}
-            onCall={selectedChat.type !== "channel" ? handleCall : undefined}
-            onCreateTopic={handleCreateTopic}
-            onDeleteTopic={handleDeleteTopic}
-            onSettingsClick={
-              selectedChat.type === "group" || selectedChat.type === "channel"
-                ? () => setGroupSettingsOpen(true)
-                : undefined
-            }
-            onDmSettingsClick={
-              selectedChat.type === "dm" ? () => setDmSettingsOpen(true) : undefined
-            }
+            contacts={defaultContacts}
+            folders={folders}
+            onClose={() => setGroupSettingsOpen(false)}
+            onUpdateChat={handleUpdateChat}
+            onDeleteChat={handleDeleteChat}
+            onFoldersChange={setFolders}
           />
-        ) : (
-          <EmptyChat />
         )}
-        </ErrorBoundary>
-      </div>
 
-      {selectedChat && (selectedChat.type === "group" || selectedChat.type === "channel") && (
-        <GroupSettingsDialog
-          open={groupSettingsOpen}
-          chat={selectedChat}
-          contacts={defaultContacts}
-          folders={folders}
-          onClose={() => setGroupSettingsOpen(false)}
-          onUpdateChat={handleUpdateChat}
-          onDeleteChat={handleDeleteChat}
-          onFoldersChange={setFolders}
+        {selectedChat && selectedChat.type === "dm" && (
+          <DmSettingsDialog
+            open={dmSettingsOpen}
+            chat={selectedChat}
+            folders={folders}
+            onClose={() => setDmSettingsOpen(false)}
+            onUpdateChat={handleUpdateChat}
+            onDeleteChat={handleDeleteChat}
+            onFoldersChange={setFolders}
+            onBlockUser={handleBlockUser}
+          />
+        )}
+
+        <AccountSettings
+          open={settingsOpen}
+          profile={profile}
+          onClose={() => setSettingsOpen(false)}
+          onUpdate={handleUpdateProfile}
+          onLogout={() => { setSettingsOpen(false); onLogout?.(); }}
         />
-      )}
 
-      {selectedChat && selectedChat.type === "dm" && (
-        <DmSettingsDialog
-          open={dmSettingsOpen}
-          chat={selectedChat}
-          folders={folders}
-          onClose={() => setDmSettingsOpen(false)}
-          onUpdateChat={handleUpdateChat}
-          onDeleteChat={handleDeleteChat}
-          onFoldersChange={setFolders}
-          onBlockUser={handleBlockUser}
-        />
-      )}
+        {selectedChat && (
+          <CallScreen
+            open={callOpen}
+            type={callType}
+            contactName={selectedChat.name}
+            contactAvatar={selectedChat.avatar}
+            matrixCall={activeCall}
+            onEnd={handleEndCall}
+          />
+        )}
 
-      <AccountSettings
-        open={settingsOpen}
-        profile={profile}
-        onClose={() => setSettingsOpen(false)}
-        onUpdate={handleUpdateProfile}
-        onLogout={() => { setSettingsOpen(false); onLogout?.(); }}
-      />
-
-      {selectedChat && (
-        <CallScreen
-          open={callOpen}
-          type={callType}
-          contactName={selectedChat.name}
-          contactAvatar={selectedChat.avatar}
-          matrixCall={activeCall}
-          onEnd={handleEndCall}
-        />
-      )}
-
-      {incomingCall && !callOpen && (
-        <IncomingCallBanner
-          callerName={incomingCallerName}
-          onAccept={handleAcceptIncoming}
-          onReject={handleRejectIncoming}
-        />
-      )}
+        {incomingCall && !callOpen && (
+          <IncomingCallBanner
+            callerName={incomingCallerName}
+            onAccept={handleAcceptIncoming}
+            onReject={handleRejectIncoming}
+          />
+        )}
       </div>
     </div>
   );

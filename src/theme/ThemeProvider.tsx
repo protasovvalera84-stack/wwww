@@ -25,6 +25,12 @@ type ThemeContextType = {
 };
 
 const paletteColors: Record<string, PaletteColors> = {
+  nexalink: {
+    primary: "142 72% 40%",
+    primaryGlow: "160 70% 38%",
+    accent: "196 80% 45%",
+    ring: "142 72% 40%",
+  },
   violet: {
     primary: "280 85% 55%",
     primaryGlow: "320 80% 55%",
@@ -52,6 +58,12 @@ const paletteColors: Record<string, PaletteColors> = {
 };
 
 const paletteColorsDark: Record<string, PaletteColors> = {
+  nexalink: {
+    primary: "142 78% 52%",
+    primaryGlow: "160 72% 48%",
+    accent: "196 90% 58%",
+    ring: "142 78% 52%",
+  },
   violet: {
     primary: "280 95% 70%",
     primaryGlow: "320 90% 70%",
@@ -79,14 +91,15 @@ const paletteColorsDark: Record<string, PaletteColors> = {
 };
 
 const defaultPalettes: PaletteInfo[] = [
-  { id: "violet", name: "Violet Mesh", description: "Default purple-pink gradient theme", swatch: ["#a855f7", "#ec4899", "#06b6d4"] },
+  { id: "nexalink", name: "NexaLink Green", description: "WhatsApp-style green — relay model", swatch: ["#22c55e", "#16a34a", "#0d9488"] },
+  { id: "violet", name: "Violet Mesh", description: "Purple-pink gradient theme", swatch: ["#a855f7", "#ec4899", "#06b6d4"] },
   { id: "emerald", name: "Emerald Node", description: "Green-teal nature inspired", swatch: ["#10b981", "#14b8a6", "#06b6d4"] },
   { id: "amber", name: "Amber Signal", description: "Warm amber-orange tones", swatch: ["#f59e0b", "#ef4444", "#f97316"] },
   { id: "blue", name: "Blue Circuit", description: "Cool blue-indigo palette", swatch: ["#3b82f6", "#6366f1", "#8b5cf6"] },
 ];
 
 const ThemeContext = createContext<ThemeContextType>({
-  palette: "violet",
+  palette: "nexalink",
   mode: "dark",
   minimalMode: false,
   setPalette: () => {},
@@ -154,7 +167,7 @@ function applyPaletteColors(root: HTMLElement, paletteId: string, isDark: boolea
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [palette, setPaletteState] = useState(() =>
-    typeof window !== "undefined" ? localStorage.getItem("nexalink-palette") || "violet" : "violet",
+    typeof window !== "undefined" ? localStorage.getItem("nexalink-palette") || "nexalink" : "nexalink",
   );
   const [mode, setMode] = useState<"dark" | "light">(getInitialMode);
   const [minimalMode, setMinimalMode] = useState(() => localStorage.getItem("nexalink-minimal") === "true");

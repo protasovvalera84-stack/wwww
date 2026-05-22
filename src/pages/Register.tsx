@@ -10,6 +10,8 @@ import { registerAccount, loginAccount, checkServer, NexaLinkSession } from "@/l
 
 interface RegisterPageProps {
   onComplete: (profile: UserProfile, language: string, platform: PlatformId | null) => void;
+  defaultView?: "register" | "login";
+  onBack?: () => void;
 }
 
 type Step = "welcome" | "login" | "language" | "platform" | "profile" | "done";
@@ -37,14 +39,17 @@ function detectPlatform(): PlatformId {
   return "linux";
 }
 
-export default function RegisterPage({ onComplete }: RegisterPageProps) {
+export default function RegisterPage({ onComplete, defaultView, onBack }: RegisterPageProps) {
   // Skip welcome/platform screens on installed apps (Electron, PWA, Android WebView)
   const isInstalledApp = !!(window as any).nexalink?.isDesktop
     || window.matchMedia("(display-mode: standalone)").matches
     || window.matchMedia("(display-mode: fullscreen)").matches
     || (window.navigator as any).standalone === true
     || /NexaLinkAndroid/i.test(navigator.userAgent);
-  const [step, setStep] = useState<Step>(isInstalledApp ? "login" : "welcome");
+
+  // If defaultView is "login", start on login step directly
+  const initialStep: Step = isInstalledApp ? "login" : (defaultView === "login" ? "login" : "welcome");
+  const [step, setStep] = useState<Step>(initialStep);
   const [lang, setLang] = useState("en");
   const [langSearch, setLangSearch] = useState("");
   const [platform, setPlatform] = useState<PlatformId | null>(null);
@@ -257,6 +262,15 @@ export default function RegisterPage({ onComplete }: RegisterPageProps) {
         {/* ===== WELCOME ===== */}
         {step === "welcome" && (
           <div className="flex flex-col items-center gap-8 text-center animate-fade-in-up">
+            {/* Back to landing */}
+            {onBack && (
+              <button
+                onClick={onBack}
+                className="self-start flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" /> Назад
+              </button>
+            )}
             <div className="relative">
               <div className="absolute inset-0 gradient-primary blur-2xl opacity-50 animate-glow rounded-3xl" />
               <div className="relative flex h-24 w-24 items-center justify-center rounded-3xl gradient-primary shadow-elegant">
@@ -322,7 +336,7 @@ export default function RegisterPage({ onComplete }: RegisterPageProps) {
         {step === "login" && (
           <div className="rounded-3xl glass-strong border border-border/60 shadow-elegant p-6 animate-fade-in-up">
             <div className="flex items-center gap-3 mb-5">
-              <button onClick={() => setStep("welcome")} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
+              <button onClick={() => onBack ? onBack() : setStep("welcome")} className="rounded-lg p-1.5 hover:bg-surface-hover transition-colors">
                 <ChevronLeft className="h-4 w-4 text-muted-foreground" />
               </button>
               <div className="flex-1">
