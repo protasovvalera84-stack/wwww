@@ -23,12 +23,17 @@ ANDROID_DIR="$REPO_DIR/android-native"
 if [ -d "$ANDROID_DIR" ]; then
     cd "$ANDROID_DIR"
 
+    # Inject the real server URL into build.gradle
+    log "Injecting server URL: $SERVER_URL"
+    sed -i "s|buildConfigField \"String\", \"SERVER_URL\", \".*\"|buildConfigField \"String\", \"SERVER_URL\", \"\\\"${SERVER_URL}\\\"\"|g" \
+        app/build.gradle
+
     # Ensure SDK path
     ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
     export ANDROID_SDK_ROOT ANDROID_HOME="$ANDROID_SDK_ROOT"
     echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
-    # Ensure icons exist
+    # Generate NexaLink green launcher icons (168,85,247 → 34,197,94 = green)
     for d in mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi; do
         mkdir -p "app/src/main/res/$d"
         if [ ! -f "app/src/main/res/$d/ic_launcher.png" ]; then
@@ -46,7 +51,7 @@ def png(w,h,r,g,b):
         c=t+d; return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c)&0xffffffff)
     return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b'')
 s={'mipmap-hdpi':48,'mipmap-xhdpi':72,'mipmap-xxhdpi':96}['$d']
-with open('app/src/main/res/$d/ic_launcher.png','wb') as f: f.write(png(s,s,168,85,247))
+with open('app/src/main/res/$d/ic_launcher.png','wb') as f: f.write(png(s,s,34,197,94))
 " 2>/dev/null || true
         fi
     done
@@ -61,13 +66,20 @@ with open('app/src/main/res/$d/ic_launcher.png','wb') as f: f.write(png(s,s,168,
 
     if [ -f "gradlew" ]; then
         chmod +x gradlew
-        ./gradlew assembleDebug --stacktrace 2>&1 | grep -E "error:|Error:|FAILED|BUILD|e: file" | tail -20
-        APK=$(find . -name "*.apk" -path "*/debug/*" | head -1)
+        log "Running Gradle assembleRelease..."
+        ./gradlew assembleRelease 2>&1 | grep -E "error:|Error:|FAILED|BUILD|e: file|warning:" | tail -30
+        APK=$(find . -name "*.apk" -path "*/release/*" | head -1)
+        # Fallback to debug if release fails
+        if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            log "Release failed, trying debug..."
+            ./gradlew assembleDebug 2>&1 | tail -10
+            APK=$(find . -name "*.apk" -path "*/debug/*" | head -1)
+        fi
         if [ -n "$APK" ] && [ -f "$APK" ]; then
             cp "$APK" "$OUTPUT_DIR/native/NexaLink-Android.apk"
             log "Android APK: $(du -h "$OUTPUT_DIR/native/NexaLink-Android.apk" | cut -f1)"
         else
-            err "Android APK build failed"
+            err "Android APK build failed — check Gradle output above"
         fi
     else
         err "No gradle wrapper — skipping Android native build"
