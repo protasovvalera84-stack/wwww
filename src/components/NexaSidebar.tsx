@@ -374,7 +374,7 @@ export function NexaSidebar({
           const isSelected = selectedChatId === chat.id;
           const isMuted = mutedChats.has(chat.id);
           const unread = chat.unread || 0;
-          const isOnline = mesh.rooms.find(r => r.id === chat.id)?.members?.some(m => m.presence === "online" && m.userId !== mesh.userId);
+          const isOnline = mesh.rooms.find(r => r.id === chat.id)?.memberList?.some(m => m.presence === "online" && m.userId !== mesh.userId);
           const avatarUrl = chat.avatarUrl ? mxcToUrl(chat.avatarUrl) : null;
 
           return (

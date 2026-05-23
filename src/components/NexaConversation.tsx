@@ -12,13 +12,13 @@
 import { useState, useRef, useEffect, useCallback, lazy, Suspense } from "react";
 import {
   Phone, Video, MoreVertical, Paperclip, Smile, Send, Lock, Timer,
-  Mic, ArrowLeft, Play, Download, Forward, Copy, Trash2, Check,
-  ChevronDown, X, Image, Film, FileText, Search,
+  Mic, ArrowLeft, Play, Download, Forward, Copy, Trash2,
+  ChevronDown, X, Film, FileText,
 } from "lucide-react";
 import { Virtuoso } from "react-virtuoso";
-import { Chat, Message, MediaAttachment, Topic } from "@/data/mockData";
+import { Chat, Message, MediaAttachment } from "@/data/mockData";
 import { useMesh } from "@/lib/MeshProvider";
-import { mxcToUrl, mxcToThumbnail, getInitials, downloadMedia } from "@/lib/meshClient";
+import { mxcToUrl, mxcToThumbnail, getInitials } from "@/lib/meshClient";
 import { uploadMedia } from "@/lib/meshClient";
 import { EmojiPicker } from "@/components/EmojiPicker";
 import { GifPicker } from "@/components/GifPicker";
@@ -39,7 +39,9 @@ interface NexaConversationProps {
 
 const waveformHeights = [8, 16, 10, 22, 14, 24, 12, 20, 8, 18, 22, 12, 18, 8, 24, 16, 10];
 
-function formatTime(ts: number) {
+function formatTime(ts: number | string): string {
+  // Mock data passes pre-formatted strings ("10:02 AM"); Matrix events pass epoch ms
+  if (typeof ts === "string") return ts;
   return new Date(ts).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
 }
 
@@ -80,10 +82,18 @@ export function NexaConversation({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Save draft
+  // Save draft + send typing indicator
   useEffect(() => {
     localStorage.setItem(`nexalink-draft-${chat.id}`, input);
-  }, [input, chat.id]);
+    // Typing indicator: send "is typing" when user types, stop after 5s
+    if (input.length > 0) {
+      mesh.sendTyping(chat.id, true);
+      const t = setTimeout(() => mesh.sendTyping(chat.id, false), 5000);
+      return () => clearTimeout(t);
+    } else {
+      mesh.sendTyping(chat.id, false);
+    }
+  }, [input, chat.id, mesh]);
 
   // Mark as read when viewing
   useEffect(() => {
@@ -121,12 +131,14 @@ export function NexaConversation({
     if (files.length === 0) return;
     e.target.value = "";
 
-    if (!mesh.session) return;
+    // Use mesh.session.accessToken (now properly exposed)
+    if (!mesh.session?.accessToken) return;
     setUploading(true);
     try {
       const results = await Promise.all(
         files.map(async (file) => {
-          const encInfo = await uploadMedia(mesh.session!.accessToken, file);
+          // uploadMedia returns EncryptedFileInfo — extract the mxc:// URL for display
+          const encInfo = await uploadMedia(mesh.session.accessToken, file);
           const type: MediaAttachment["type"] =
             file.type.startsWith("video/") ? "video" :
             file.type.startsWith("audio/") ? "audio" :
@@ -135,7 +147,7 @@ export function NexaConversation({
             id: `media-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             type,
             name: file.name,
-            url: encInfo.url,
+            url: encInfo.url,          // mxc:// URI — converted to HTTP on display
             size: file.size,
             mimeType: file.type,
           } as MediaAttachment;
@@ -151,11 +163,13 @@ export function NexaConversation({
   const messages = chat.messages;
   const lastIncoming = messages.filter(m => !m.isOwn).at(-1);
   const smartReplies = getSmartReplies(lastIncoming);
+  // Who is currently typing in this chat
+  const typingNames = mesh.typingUsers[chat.id] || [];
 
-  // Is there someone online in this chat?
+  // Is there someone online in this chat? (uses memberList from MeshRoom)
   const isOnline = mesh.rooms
     .find(r => r.id === chat.id)
-    ?.members?.some(m => m.presence === "online" && m.userId !== mesh.userId);
+    ?.memberList?.some(m => m.presence === "online" && m.userId !== mesh.userId);
 
   return (
     <div className="flex flex-col h-full bg-background overflow-hidden relative">
@@ -327,8 +341,26 @@ export function NexaConversation({
         )}
       </div>
 
+      {/* ── Typing indicator ── */}
+      {typingNames.length > 0 && (
+        <div className="relative z-10 flex items-center gap-2 px-5 py-1.5 border-t border-border/20">
+          <div className="flex gap-0.5">
+            {[0, 1, 2].map(i => (
+              <span
+                key={i}
+                className="size-1.5 bg-primary rounded-full animate-bounce"
+                style={{ animationDelay: `${i * 150}ms` }}
+              />
+            ))}
+          </div>
+          <span className="text-[11px] text-muted-foreground">
+            {typingNames.join(", ")} {typingNames.length === 1 ? "печатает" : "печатают"}…
+          </span>
+        </div>
+      )}
+
       {/* ── Smart replies ── */}
-      {smartReplies.length > 0 && !input && (
+      {smartReplies.length > 0 && !input && typingNames.length === 0 && (
         <div className="relative z-10 flex gap-2 overflow-x-auto no-scrollbar px-4 py-2 border-t border-border/20">
           {smartReplies.map((r) => (
             <button
@@ -521,7 +553,8 @@ export function NexaConversation({
 /** Individual message bubble — WhatsApp 2026 style with long-press context menu */
 function MessageBubble({ msg, onReply }: { msg: Message; onReply: () => void }) {
   const mesh = useMesh();
-  const isOwn = msg.isOwn || msg.sender === mesh.userName;
+  // isOwn: use msg.isOwn flag OR compare sender with current user's display name
+  const isOwn = msg.isOwn === true || msg.sender === mesh.userName || msg.senderId === mesh.userId;
   const [menuOpen, setMenuOpen] = useState(false);
   const [reactionOpen, setReactionOpen] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -798,7 +831,14 @@ function MediaItem({ attachment, isOwn }: { attachment: MediaAttachment; isOwn: 
   // Generic file
   return (
     <button
-      onClick={() => downloadMedia(attachment)}
+      onClick={() => {
+        // Browser native download
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = attachment.name;
+        a.target = "_blank";
+        a.click();
+      }}
       className={`flex items-center gap-2 mb-1 px-3 py-2 rounded-xl ${isOwn ? "bg-white/15 hover:bg-white/25" : "bg-primary/10 hover:bg-primary/20"} transition-all`}
     >
       <FileText className="size-5 shrink-0" />

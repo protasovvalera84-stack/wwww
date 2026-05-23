@@ -10,13 +10,20 @@ export interface MediaAttachment {
 export interface Message {
   id: string;
   senderId: string;
+  /** Display name of sender (for UI). Optional for backward compat. */
+  sender?: string;
   text: string;
-  timestamp: string;
+  /** Either epoch ms (real Matrix events) or a pre-formatted string (mock data) */
+  timestamp: number | string;
+  /** True if the current user sent this message */
+  isOwn?: boolean;
   read: boolean;
   media?: MediaAttachment[];
   topicId?: string | null;
   replyToId?: string;
   replyToText?: string;
+  /** Collapsed reply preview */
+  replyTo?: { sender: string; text: string };
   reactions?: Record<string, number>;
 }
 

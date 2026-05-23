@@ -159,8 +159,11 @@ export interface MeshRoom {
   type: "dm" | "group" | "channel";
   lastMessage: string;
   lastMessageTime: string;
+  lastEvent: unknown;           // raw Matrix event for read receipts
   unread: number;
   members: number;
+  /** Full member list — used for online status, call UI, etc. */
+  memberList: { userId: string; name: string; presence: string }[];
   online: boolean;
   lastSeen?: string;
 }
@@ -170,7 +173,8 @@ export interface MeshMessage {
   senderId: string;
   senderName: string;
   text: string;
-  timestamp: string;
+  /** Epoch milliseconds (NOT a formatted string) */
+  timestamp: number;
   isOwn: boolean;
   topicId?: string;
   mediaUrl?: string;
@@ -178,7 +182,7 @@ export interface MeshMessage {
   mediaName?: string;
   replyToId?: string;
   replyToText?: string;
-  reactions?: Record<string, number>; // emoji → count
+  reactions?: Record<string, number>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -188,8 +192,11 @@ export interface MeshMessage {
 interface MeshContextValue {
   client: MeshClient | null;
   ready: boolean;
+  syncing: boolean;               // true while initial sync is in progress
   error: string | null;
   userId: string;
+  userName: string;               // display-friendly name derived from userId
+  session: NexaLinkSession;      // full session (contains accessToken)
   rooms: MeshRoom[];
   messageVersion: number;
   typingUsers: Record<string, string[]>;
@@ -381,8 +388,18 @@ function roomToMesh(room: SdkRoom, myUserId: string, directRoomIds: Set<string>,
     type: roomType,
     lastMessage,
     lastMessageTime,
+    lastEvent: lastEvt ?? null,
     unread: room.getUnreadNotificationCount("total") || 0,
     members: members.length,
+    memberList: members.map((m) => {
+      let presence = "offline";
+      try {
+        const user = client?.getUser(m.userId);
+        if (user?.presence === "online" || user?.currentlyActive) presence = "online";
+        else if (user?.presence === "unavailable") presence = "away";
+      } catch { /* ignore */ }
+      return { userId: m.userId, name: m.name || m.userId.split(":")[0].replace("@", ""), presence };
+    }),
     online,
     lastSeen,
   };
@@ -400,23 +417,28 @@ function eventToMesh(evt: MeshEvent, client: MeshClient): MeshMessage | null {
   let mediaType: "image" | "video" | "audio" | undefined;
   let mediaName: string | undefined;
 
-  if (msgtype === "m.image" && content.url) {
-    mediaUrl = mxcToThumbnail(content.url as string, 800, 600);
+  // Support both encrypted media (content.file) and plain media (content.url)
+  const encFile = content.file as { url?: string } | undefined;
+  const plainUrl = content.url as string | undefined;
+  const mediaSource = encFile?.url || plainUrl;
+
+  if (msgtype === "m.image" && mediaSource) {
+    mediaUrl = mxcToThumbnail(mediaSource, 800, 600);
     mediaType = "image";
     mediaName = text;
     text = "";
-  } else if (msgtype === "m.video" && content.url) {
-    mediaUrl = mxcToUrl(content.url as string);
+  } else if (msgtype === "m.video" && mediaSource) {
+    mediaUrl = mxcToUrl(mediaSource);
     mediaType = "video";
     mediaName = text;
     text = "";
-  } else if (msgtype === "m.audio" && content.url) {
-    mediaUrl = mxcToUrl(content.url as string);
+  } else if (msgtype === "m.audio" && mediaSource) {
+    mediaUrl = mxcToUrl(mediaSource);
     mediaType = "audio";
     mediaName = text;
     text = "";
-  } else if (msgtype === "m.file" && content.url) {
-    mediaUrl = mxcToUrl(content.url as string);
+  } else if (msgtype === "m.file" && mediaSource) {
+    mediaUrl = mxcToUrl(mediaSource);
     mediaName = text;
     text = "";
   }
@@ -489,7 +511,7 @@ function eventToMesh(evt: MeshEvent, client: MeshClient): MeshMessage | null {
     senderId,
     senderName: getUserDisplayName(client, senderId),
     text,
-    timestamp: formatTime(evt.getTs()),
+    timestamp: evt.getTs(),   // epoch ms — NexaConversation formats this
     isOwn: senderId === client.getUserId(),
     topicId,
     mediaUrl,
@@ -524,11 +546,15 @@ interface Props {
 export function MeshProvider({ session, children }: Props) {
   const clientRef = useRef<MeshClient | null>(null);
   const [ready, setReady] = useState(false);
+  const [syncing, setSyncing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rooms, setRooms] = useState<MeshRoom[]>([]);
   const [messageVersion, setMessageVersion] = useState(0);
   const [typingUsers, setTypingUsers] = useState<Record<string, string[]>>({});
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Derived userName from userId (e.g. "@alice:server" → "alice")
+  const userName = session.userId.split(":")[0].replace("@", "");
 
   const refreshRooms = useCallback(() => {
     const c = clientRef.current;
@@ -706,6 +732,7 @@ export function MeshProvider({ session, children }: Props) {
       await startClient(client);
       if (!cancelled) {
         setReady(true);
+        setSyncing(false);
         refreshRooms();
         // Auto-create registry room if it doesn't exist
         const serverName = session.userId.split(":")[1] || "";
@@ -819,43 +846,47 @@ export function MeshProvider({ session, children }: Props) {
   const sendMedia = useCallback(async (roomId: string, file: File, topicId?: string | null) => {
     const c = clientRef.current;
     if (!c) return;
-    const mxcUri = await uploadMedia(session.accessToken, file);
+
+    // Encrypt client-side (AES-256-CTR) — server only stores encrypted blob
+    const encInfo = await uploadMedia(session.accessToken, file);
+
     let msgtype = "m.file";
     if (file.type.startsWith("image/")) msgtype = "m.image";
     else if (file.type.startsWith("video/")) msgtype = "m.video";
     else if (file.type.startsWith("audio/")) msgtype = "m.audio";
+
     const content: Record<string, unknown> = {
       msgtype,
       body: file.name,
-      url: mxcUri,
+      // Matrix encrypted media spec: key/iv/hashes stored in 'file' field
+      file: encInfo,
       info: { mimetype: file.type, size: file.size },
     };
-    if (topicId) {
-      content["org.nexalink.topic_id"] = topicId;
-    }
-    const txn = `m${Date.now()}.${Math.random().toString(36).slice(2,6)}`; await fetch(`${c.getHomeserverUrl()}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txn}`, { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${c.getAccessToken()}` }, body: JSON.stringify(content) });
+    if (topicId) content["org.nexalink.topic_id"] = topicId;
 
-    // Save to My Files (localStorage) so it appears in Settings → My Files
+    const txn = `m${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+    await fetch(
+      `${c.getHomeserverUrl()}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txn}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${c.getAccessToken()}` },
+        body: JSON.stringify(content),
+      },
+    );
+
+    // Cache in My Files (Settings → My Files)
     try {
       const mediaType = file.type.startsWith("video/") ? "video"
         : file.type.startsWith("audio/") ? "music"
         : file.type.startsWith("image/") ? "photos"
         : "files";
-      const httpUrl = mxcToUrl(mxcUri);
+      const httpUrl = mxcToUrl(encInfo.url);
       const key = `nexalink-media-${mediaType}`;
       const existing = JSON.parse(localStorage.getItem(key) || "[]");
-      const entry = {
-        id: mxcUri,
-        name: file.name,
-        size: `${(file.size / 1024).toFixed(0)} KB`,
-        date: new Date().toLocaleDateString(),
-        url: httpUrl,
-        mimeType: file.type,
-      };
-      // Avoid duplicates
-      const filtered = existing.filter((e: { id: string }) => e.id !== mxcUri);
+      const entry = { id: encInfo.url, name: file.name, size: `${(file.size / 1024).toFixed(0)} KB`, date: new Date().toLocaleDateString(), url: httpUrl, mimeType: file.type };
+      const filtered = existing.filter((e: { id: string }) => e.id !== encInfo.url);
       localStorage.setItem(key, JSON.stringify([entry, ...filtered].slice(0, 500)));
-    } catch { /* ignore */ }
+    } catch { /* non-critical */ }
   }, [session.accessToken]);
 
   const deleteMessage = useCallback(async (roomId: string, eventId: string) => {
@@ -1354,8 +1385,11 @@ export function MeshProvider({ session, children }: Props) {
   const value: MeshContextValue = {
     client: clientRef.current,
     ready,
+    syncing,
     error,
     userId: session.userId,
+    userName,
+    session,
     rooms,
     messageVersion,
     typingUsers,

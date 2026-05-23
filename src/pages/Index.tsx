@@ -106,12 +106,18 @@ const Index = ({ initialProfile, onProfileChange, onLogout }: IndexProps = {}) =
       messages: messages.map((m) => ({
         id: m.id,
         senderId: m.isOwn ? "me" : m.senderId,
+        sender: m.senderName,                // display name for group bubbles
         text: m.text,
-        timestamp: m.timestamp,
+        timestamp: m.timestamp,              // epoch ms — formatTime handles it
+        isOwn: m.isOwn,                      // explicit flag for bubble direction
         read: true,
         topicId: m.topicId || msgTopicMap[m.id] || undefined,
         replyToId: m.replyToId,
         replyToText: m.replyToText,
+        // Build replyTo preview for the bubble UI
+        replyTo: m.replyToId
+          ? { sender: m.senderName, text: m.replyToText || "Message" }
+          : undefined,
         reactions: m.reactions,
         media: m.mediaUrl ? [{
           id: m.id + "-media",
