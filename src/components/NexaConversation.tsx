@@ -6,7 +6,8 @@
  * fully connected to Matrix via useMesh() + onSendMessage callback.
  *
  * Features: text/media messages, reply, reactions, voice indicator,
- * smart replies, emoji & GIF pickers, file upload, scroll-to-bottom.
+ * smart replies, emoji & GIF pickers, file upload, scroll-to-bottom,
+ * long-press/right-click horizontal action menu (WhatsApp style).
  */
 import { useState, useRef, useEffect, useCallback, lazy, Suspense } from "react";
 import {
@@ -517,17 +518,100 @@ export function NexaConversation({
   );
 }
 
-/** Individual message bubble — WhatsApp 2026 style */
+/** Individual message bubble — WhatsApp 2026 style with long-press context menu */
 function MessageBubble({ msg, onReply }: { msg: Message; onReply: () => void }) {
   const mesh = useMesh();
   const isOwn = msg.isOwn || msg.sender === mesh.userName;
-  const [showActions, setShowActions] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [reactionOpen, setReactionOpen] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e: MouseEvent | TouchEvent) => {
+      if (bubbleRef.current && !bubbleRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setReactionOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("touchstart", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("touchstart", close);
+    };
+  }, [menuOpen]);
+
+  // Long-press on mobile (600ms hold)
+  const handleTouchStart = () => {
+    holdTimer.current = setTimeout(() => {
+      navigator.vibrate?.(30); // haptic feedback
+      setMenuOpen(true);
+    }, 600);
+  };
+  const handleTouchEnd = () => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+  };
+
+  // Right-click on desktop
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setMenuOpen(true);
+  };
+
+  // Menu actions
+  const menuActions = [
+    {
+      emoji: "😊",
+      label: "Реакция",
+      action: () => { setReactionOpen(true); setMenuOpen(false); },
+    },
+    {
+      emoji: "↩",
+      label: "Ответить",
+      action: () => { onReply(); setMenuOpen(false); },
+    },
+    {
+      emoji: "⟳",
+      label: "Переслать",
+      action: () => { setMenuOpen(false); },
+    },
+    {
+      emoji: "📋",
+      label: "Копировать",
+      action: () => { navigator.clipboard.writeText(msg.text); setMenuOpen(false); },
+    },
+    {
+      emoji: "📌",
+      label: "Закрепить",
+      action: () => { setMenuOpen(false); },
+    },
+    {
+      emoji: "⭐",
+      label: "В избранное",
+      action: () => { setMenuOpen(false); },
+    },
+    {
+      emoji: "🗑",
+      label: "Удалить",
+      danger: true,
+      action: () => { setMenuOpen(false); },
+    },
+    {
+      emoji: "ℹ️",
+      label: "Инфо",
+      action: () => { setMenuOpen(false); },
+    },
+  ];
+
+  const quickReactions = ["❤️", "👍", "😂", "😮", "😢", "🙏"];
 
   return (
     <div
-      className={`flex px-4 py-1 group ${isOwn ? "justify-end" : "justify-start"}`}
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
+      ref={bubbleRef}
+      className={`flex px-4 py-0.5 relative ${isOwn ? "justify-end" : "justify-start"}`}
     >
       <div className={`max-w-[80%] space-y-0.5 ${isOwn ? "items-end" : "items-start"} flex flex-col`}>
 
@@ -536,21 +620,78 @@ function MessageBubble({ msg, onReply }: { msg: Message; onReply: () => void }) 
           <p className="text-[10px] font-bold text-primary px-1">{msg.sender}</p>
         )}
 
-        {/* Bubble */}
+        {/* ── Context menu (horizontal scroll, WhatsApp style) ── */}
+        {menuOpen && (
+          <div
+            className={`absolute z-50 ${isOwn ? "right-0" : "left-0"} bottom-full mb-1 animate-scale-in`}
+            style={{ minWidth: "280px" }}
+          >
+            {/* Quick reactions */}
+            {reactionOpen ? (
+              <div className="flex items-center gap-1 px-2 py-1.5 glass-strong border border-white/15 rounded-2xl shadow-elegant mb-1">
+                {quickReactions.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => { setReactionOpen(false); setMenuOpen(false); }}
+                    className="text-xl hover:scale-125 transition-transform active:scale-95 p-1"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+                <button
+                  onClick={() => setReactionOpen(false)}
+                  className="ml-1 text-muted-foreground/60 text-xs hover:text-foreground"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : (
+              /* Horizontal scrollable action bar */
+              <div className="glass-strong border border-white/15 rounded-2xl shadow-elegant overflow-hidden">
+                <div className="flex items-stretch overflow-x-auto no-scrollbar">
+                  {menuActions.map((item, i) => (
+                    <button
+                      key={item.label}
+                      onClick={item.action}
+                      className={`flex flex-col items-center justify-center gap-0.5 px-3 py-2.5
+                        whitespace-nowrap shrink-0 transition-all duration-150
+                        hover:bg-white/[0.08] active:bg-white/[0.15]
+                        ${item.danger ? "text-destructive hover:text-destructive" : "text-foreground/90"}
+                        ${i > 0 ? "border-l border-white/[0.08]" : ""}
+                      `}
+                      style={{ minWidth: "60px" }}
+                    >
+                      <span className="text-base leading-none">{item.emoji}</span>
+                      <span className={`text-[9px] font-medium mt-0.5 ${item.danger ? "text-destructive" : "text-muted-foreground"}`}>
+                        {item.label}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Bubble ── */}
         <div
-          className={`relative message-bubble rounded-2xl px-3 py-2 ${
-            isOwn
-              ? "rounded-tr-sm text-primary-foreground"
-              : "rounded-tl-sm glass border border-white/[0.08]"
-          }`}
+          className={`relative message-bubble rounded-2xl px-3 py-2 cursor-pointer select-none
+            ${isOwn ? "rounded-tr-sm text-primary-foreground" : "rounded-tl-sm glass border border-white/[0.08]"}
+            ${menuOpen ? "scale-[0.97] opacity-90" : ""}
+            transition-transform duration-100
+          `}
           style={isOwn ? {
             background: "var(--gradient-bubble-own)",
             boxShadow: "0 4px 12px -3px hsl(142 72% 40% / 0.35)",
           } : undefined}
+          onContextMenu={handleContextMenu}
+          onTouchStart={handleTouchStart}
+          onTouchEnd={handleTouchEnd}
+          onTouchMove={handleTouchEnd}
         >
           {/* Reply preview */}
           {msg.replyTo && (
-            <div className={`mb-2 pl-2 border-l-2 ${isOwn ? "border-white/40" : "border-primary/50"}`}>
+            <div className={`mb-2 pl-2 border-l-2 rounded ${isOwn ? "border-white/40 bg-white/10" : "border-primary/50 bg-primary/5"}`}>
               <p className={`text-[10px] font-bold ${isOwn ? "text-white/70" : "text-primary"}`}>
                 {msg.replyTo.sender}
               </p>
@@ -576,7 +717,7 @@ function MessageBubble({ msg, onReply }: { msg: Message; onReply: () => void }) 
           <div className={`flex items-center justify-end gap-1 mt-0.5 ${isOwn ? "text-white/50" : "text-muted-foreground/50"}`}>
             <span className="text-[9px] font-mono">{formatTime(msg.timestamp)}</span>
             {isOwn && (
-              <span className={`text-[10px] ${msg.read ? "text-primary" : isOwn ? "text-white/50" : ""}`}>
+              <span className={`text-[10px] ${msg.read ? "text-primary" : "text-white/50"}`}>
                 {msg.read ? "✓✓" : "✓"}
               </span>
             )}
@@ -589,7 +730,7 @@ function MessageBubble({ msg, onReply }: { msg: Message; onReply: () => void }) 
             {Object.entries(msg.reactions).map(([emoji, users]) => (
               <span
                 key={emoji}
-                className="text-[11px] px-1.5 py-0.5 rounded-full glass border border-white/10"
+                className="text-[11px] px-1.5 py-0.5 rounded-full glass border border-white/10 cursor-pointer hover:border-primary/30 transition-colors"
               >
                 {emoji} {(users as string[]).length}
               </span>
@@ -597,26 +738,6 @@ function MessageBubble({ msg, onReply }: { msg: Message; onReply: () => void }) 
           </div>
         )}
       </div>
-
-      {/* Quick action buttons (appear on hover) */}
-      {showActions && (
-        <div className={`self-end mb-2 flex items-center gap-0.5 ${isOwn ? "mr-2 order-first" : "ml-2"} animate-scale-in`}>
-          <button
-            onClick={onReply}
-            className="size-6 glass border border-white/10 rounded-full grid place-items-center hover:border-primary/30 transition-all"
-            title="Ответить"
-          >
-            <Forward className="size-2.5 text-muted-foreground" />
-          </button>
-          <button
-            onClick={() => navigator.clipboard.writeText(msg.text)}
-            className="size-6 glass border border-white/10 rounded-full grid place-items-center hover:border-primary/30 transition-all"
-            title="Копировать"
-          >
-            <Copy className="size-2.5 text-muted-foreground" />
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -1213,7 +1213,8 @@ if command -v ufw &>/dev/null; then
     ufw allow 3478/udp comment "NexaLink TURN UDP" 2>/dev/null || true
     ufw allow 5349/tcp comment "NexaLink TURN TLS TCP" 2>/dev/null || true
     ufw allow 5349/udp comment "NexaLink TURN TLS UDP" 2>/dev/null || true
-    ufw allow 49152:49172/udp comment "NexaLink TURN relay" 2>/dev/null || true
+    # Full relay port range (expanded from 49152-49172 to 49152-65535)
+    ufw allow 49152:65535/udp comment "NexaLink TURN relay" 2>/dev/null || true
 
     # Fix Docker + UFW compatibility issue:
     # Docker bypasses UFW by adding iptables rules directly.
@@ -1234,7 +1235,7 @@ if command -v ufw &>/dev/null; then
 -A DOCKER-USER -p udp --dport 3478 -j ACCEPT
 -A DOCKER-USER -p tcp --dport 5349 -j ACCEPT
 -A DOCKER-USER -p udp --dport 5349 -j ACCEPT
--A DOCKER-USER -p udp --dport 49152:49172 -j ACCEPT
+-A DOCKER-USER -p udp --dport 49152:65535 -j ACCEPT
 -A DOCKER-USER -j RETURN
 COMMIT
 # END NEXALINK-DOCKER-FIX

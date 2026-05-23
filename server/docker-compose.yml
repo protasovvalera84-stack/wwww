@@ -100,6 +100,8 @@ services:
       - nexalink
 
   # --- Coturn (TURN/STUN server for voice/video) ---
+  # CALL FIX: relay ports expanded to 49152-65535 (was only 49152-49172 = 21 ports)
+  # Old range caused "no relay available" errors and dropped calls.
   coturn:
     image: coturn/coturn:latest
     restart: always
@@ -109,7 +111,8 @@ services:
       - "${TURN_PORT:-3478}:3478/udp"
       - "${TURN_TLS_PORT:-5349}:5349/tcp"
       - "${TURN_TLS_PORT:-5349}:5349/udp"
-      - "${TURN_RELAY_MIN:-49152}-${TURN_RELAY_MAX:-49172}:49152-49172/udp"
+      # Expanded relay port range — supports ~4000 concurrent WebRTC streams
+      - "49152-65535:49152-65535/udp"
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
     networks:
