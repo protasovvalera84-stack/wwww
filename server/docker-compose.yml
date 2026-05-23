@@ -23,7 +23,7 @@ services:
       - ./postgres/optimize.sql:/docker-entrypoint-initdb.d/optimize.sql:ro
     command:
       - "postgres"
-      - "-c" 
+      - "-c"
       - "shared_buffers=256MB"
       - "-c"
       - "effective_cache_size=512MB"
@@ -32,10 +32,19 @@ services:
       - "-c"
       - "max_connections=200"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-synapse}"]
-      interval: 10s
+      # REAL auth check: pg_isready only tests TCP, this tests actual password.
+      # Synapse depends on this — it won't start until postgres passes THIS check.
+      test:
+        - "CMD-SHELL"
+        - >
+          psql -U ${POSTGRES_USER:-synapse}
+               -d ${POSTGRES_DB:-synapse}
+               -c 'SELECT 1'
+               -q --no-password 2>&1 | grep -q '1 row'
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
+      start_period: 15s
     networks:
       - nexalink
 

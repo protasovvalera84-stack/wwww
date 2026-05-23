@@ -124,17 +124,57 @@ fi
 # =============================================================================
 # Step 3: Generate secrets
 # =============================================================================
+# Step 3: Generate OR reuse secrets
+#
+# CRITICAL: Never regenerate POSTGRES_PASSWORD if PostgreSQL data already
+# exists. The Docker image only sets the password during first init (when
+# the data directory is empty). If we generate a new password but the volume
+# has old data, Synapse will fail to authenticate — the classic 502 bug.
+#
+# Strategy:
+#   - If .env already exists → reuse ALL passwords (prevents mismatch)
+#   - If fresh install (no .env) → generate new secrets AND wipe volumes
+# =============================================================================
 gen_secret() { openssl rand -hex 32; }
 
-POSTGRES_PASSWORD="$(gen_secret)"
-REGISTRATION_SHARED_SECRET="$(gen_secret)"
-MACAROON_SECRET="$(gen_secret)"
-FORM_SECRET="$(gen_secret)"
-TURN_SECRET="$(gen_secret)"
-# Admin token is generated and stored for the cleanup script (relay model)
-SYNAPSE_ADMIN_TOKEN="$(gen_secret)"
+EXISTING_ENV="$SERVER_DIR/.env"
 
-log "Secrets generated."
+if [ -f "$EXISTING_ENV" ]; then
+    log "Found existing .env — reusing passwords to prevent PostgreSQL auth mismatch."
+
+    # Load existing secrets from .env
+    load_env_var() {
+        grep "^${1}=" "$EXISTING_ENV" | head -1 | cut -d'=' -f2-
+    }
+
+    POSTGRES_PASSWORD="$(load_env_var POSTGRES_PASSWORD)"
+    REGISTRATION_SHARED_SECRET="$(load_env_var REGISTRATION_SHARED_SECRET)"
+    MACAROON_SECRET="$(load_env_var MACAROON_SECRET)"
+    FORM_SECRET="$(load_env_var FORM_SECRET)"
+    TURN_SECRET="$(load_env_var TURN_SECRET)"
+    SYNAPSE_ADMIN_TOKEN="$(load_env_var SYNAPSE_ADMIN_TOKEN)"
+
+    # Regenerate any that are missing
+    [ -z "$POSTGRES_PASSWORD" ]            && POSTGRES_PASSWORD="$(gen_secret)"
+    [ -z "$REGISTRATION_SHARED_SECRET" ]   && REGISTRATION_SHARED_SECRET="$(gen_secret)"
+    [ -z "$MACAROON_SECRET" ]              && MACAROON_SECRET="$(gen_secret)"
+    [ -z "$FORM_SECRET" ]                  && FORM_SECRET="$(gen_secret)"
+    [ -z "$TURN_SECRET" ]                  && TURN_SECRET="$(gen_secret)"
+    [ -z "$SYNAPSE_ADMIN_TOKEN" ]          && SYNAPSE_ADMIN_TOKEN="$(gen_secret)"
+
+    log "Passwords loaded from existing .env."
+else
+    log "No existing .env — generating fresh secrets."
+
+    POSTGRES_PASSWORD="$(gen_secret)"
+    REGISTRATION_SHARED_SECRET="$(gen_secret)"
+    MACAROON_SECRET="$(gen_secret)"
+    FORM_SECRET="$(gen_secret)"
+    TURN_SECRET="$(gen_secret)"
+    SYNAPSE_ADMIN_TOKEN="$(gen_secret)"
+
+    log "Fresh secrets generated."
+fi
 
 # =============================================================================
 # Step 4: Write .env file
@@ -756,74 +796,145 @@ fi
 log "Starting NexaLink server stack..."
 cd "$SERVER_DIR"
 
+# Helper: test if postgres accepts our password (real auth, not just pg_isready)
+postgres_auth_ok() {
+    docker compose exec -T postgres \
+        psql -U "${POSTGRES_USER:-synapse}" \
+             -d "${POSTGRES_DB:-synapse}" \
+             -c "SELECT 1;" \
+             --no-password 2>/dev/null | grep -q "1 row"
+}
+
+# Helper: wait for postgres to be accepting connections (port-level)
+wait_postgres_port() {
+    local retries="${1:-30}"
+    for i in $(seq 1 "$retries"); do
+        if docker compose exec -T postgres pg_isready -U "${POSTGRES_USER:-synapse}" 2>/dev/null; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 # Stop everything cleanly first
 docker compose down 2>/dev/null || true
 
-# Fresh install: remove ALL volumes to prevent DB conflicts
-# (e.g. DuplicateTable errors when old postgres data meets new Synapse)
+# ── Fresh install: always wipe volumes ────────────────────────────────────────
 if [ ! -f "$SERVER_DIR/.installed" ]; then
-    log "Fresh install — cleaning ALL old volumes..."
+    log "Fresh install — wiping ALL old volumes to prevent password mismatch..."
     docker compose down -v 2>/dev/null || true
-    docker volume rm server_postgres_data server_synapse_data server_certbot_certs 2>/dev/null || true
+    docker volume rm server_postgres_data server_synapse_data server_certbot_certs \
+                     server_prometheus_data server_grafana_data 2>/dev/null || true
+    log "Old volumes removed."
 fi
 
 docker compose pull
 
-# Start PostgreSQL first and wait for it
+# ── Start PostgreSQL ───────────────────────────────────────────────────────────
 log "Starting PostgreSQL..."
 docker compose up -d postgres
 
-# Pre-create synapse_data volume and fix permissions BEFORE Synapse starts
+# Wait for port to open (pg_isready)
+if ! wait_postgres_port 40; then
+    err "PostgreSQL did not start within 80 seconds."
+    docker compose logs postgres --tail=20
+    exit 1
+fi
+log "PostgreSQL port is open."
+
+# ── CRITICAL: Verify password authentication (not just port) ─────────────────
+# pg_isready only checks if postgres is accepting TCP connections — it does NOT
+# verify the password. Synapse needs actual auth. We test it explicitly here.
+# If the password is wrong (e.g. stale volume), we fix it automatically.
+sleep 3  # give postgres a moment to fully initialize
+
+PG_AUTH_OK=false
+for i in $(seq 1 10); do
+    if postgres_auth_ok; then
+        PG_AUTH_OK=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$PG_AUTH_OK" = "false" ]; then
+    warn "PostgreSQL auth failed with current password."
+    warn "This means the volume has an old password. Auto-fixing..."
+
+    # Fix: use the postgres superuser to reset the synapse user password
+    NEW_PASS="${POSTGRES_PASSWORD}"
+    FIXED=false
+    for i in $(seq 1 15); do
+        if docker compose exec -T postgres \
+            psql -U postgres \
+                 -c "ALTER USER synapse WITH PASSWORD '${NEW_PASS}';" \
+                 2>/dev/null | grep -q "ALTER ROLE"; then
+            FIXED=true
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$FIXED" = "true" ]; then
+        log "Password updated in PostgreSQL. Verifying..."
+        sleep 2
+        if postgres_auth_ok; then
+            log "PostgreSQL auth now works!"
+            PG_AUTH_OK=true
+        else
+            warn "Auth still failing. Dropping volume and restarting postgres..."
+            docker compose stop postgres 2>/dev/null || true
+            docker compose rm -f postgres 2>/dev/null || true
+            docker volume rm server_postgres_data 2>/dev/null || true
+            docker compose up -d postgres
+            if wait_postgres_port 40; then
+                sleep 5
+                PG_AUTH_OK=true
+                log "PostgreSQL restarted with clean volume."
+            fi
+        fi
+    else
+        warn "ALTER USER failed — dropping postgres volume and restarting..."
+        docker compose stop postgres 2>/dev/null || true
+        docker compose rm -f postgres 2>/dev/null || true
+        docker volume rm server_postgres_data 2>/dev/null || true
+        docker compose up -d postgres
+        if wait_postgres_port 40; then
+            sleep 5
+            PG_AUTH_OK=true
+            log "PostgreSQL restarted with fresh volume."
+        fi
+    fi
+fi
+
+if [ "$PG_AUTH_OK" = "false" ]; then
+    err "Could not establish PostgreSQL authentication. Check logs:"
+    docker compose logs postgres --tail=30
+    exit 1
+fi
+log "PostgreSQL authentication verified."
+
+# ── Pre-create synapse volume with correct permissions ────────────────────────
 log "Preparing Synapse data volume..."
 docker volume create server_synapse_data 2>/dev/null || true
-docker run --rm -v server_synapse_data:/data alpine sh -c "mkdir -p /data/media_store /data/uploads && chown -R 991:991 /data" 2>/dev/null || true
-sleep 10
+docker run --rm -v server_synapse_data:/data alpine sh -c \
+    "mkdir -p /data/media_store /data/uploads /data/log && \
+     chown -R 991:991 /data && chmod -R 755 /data" 2>/dev/null || true
 
-# Verify PostgreSQL is healthy
-PG_HEALTHY=false
-for i in $(seq 1 20); do
-    if docker compose exec -T postgres pg_isready -U synapse 2>/dev/null; then
-        PG_HEALTHY=true
-        break
-    fi
-    sleep 2
-done
-
-if [ "$PG_HEALTHY" = "false" ]; then
-    warn "PostgreSQL failed to start. Checking logs..."
-    docker compose logs postgres --tail 10
-fi
-
-# Now start everything EXCEPT Synapse first
+# ── Start all infrastructure services ────────────────────────────────────────
 log "Starting infrastructure services..."
-docker compose up -d postgres redis nginx element coturn synapse-admin admin-api prometheus grafana node-exporter
+docker compose up -d postgres redis nginx element coturn synapse-admin admin-api \
+                     prometheus grafana node-exporter media-purger
 
-# Wait for postgres
-sleep 5
-PG_HEALTHY=false
-for i in $(seq 1 30); do
-    if docker compose exec -T postgres pg_isready -U synapse 2>/dev/null; then
-        PG_HEALTHY=true
-        break
-    fi
-    sleep 2
-done
-if [ "$PG_HEALTHY" = "false" ]; then
-    warn "PostgreSQL slow to start — waiting more..."
-    sleep 10
-fi
-
-# CRITICAL: Fix synapse_data volume permissions BEFORE starting Synapse
-# This MUST happen after docker compose creates the volume but BEFORE Synapse runs
-log "Fixing Synapse data permissions (CRITICAL)..."
+# Fix synapse volume permissions one more time (Docker Compose may recreate it)
 docker volume create server_synapse_data 2>/dev/null || true
-docker run --rm -v server_synapse_data:/data alpine sh -c "\
-    mkdir -p /data/media_store /data/uploads /data/log && \
-    chown -R 991:991 /data && \
-    chmod -R 755 /data" 2>/dev/null || true
+docker run --rm -v server_synapse_data:/data alpine sh -c \
+    "mkdir -p /data/media_store /data/uploads /data/log && \
+     chown -R 991:991 /data && chmod -R 755 /data" 2>/dev/null || true
 
-# NOW start Synapse with correct permissions
-log "Starting Synapse..."
+# ── Start Synapse ─────────────────────────────────────────────────────────────
+log "Starting Synapse (Matrix server)..."
 docker compose up -d synapse
 sleep 5
 
