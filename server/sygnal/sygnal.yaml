@@ -1,0 +1,45 @@
+# Sygnal — Push Notification Gateway for NexaLink
+# https://github.com/matrix-org/sygnal
+#
+# To enable push notifications:
+#   Android (FCM): add your Firebase server key below
+#   iOS (APNs): add your .p8 key + app bundle ID below
+#
+# If no apps are configured, Sygnal starts but returns 200 with no-op.
+# This is safe — Matrix clients fall back to polling when push is absent.
+
+server:
+  bind_addresses: ["0.0.0.0"]
+  port: 5000
+
+database:
+  # Use in-memory store for simplicity; swap for PostgreSQL at scale.
+  name: "memory"
+
+log:
+  level: WARNING
+  structured: true
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9092
+
+apps:
+  # ── Android (Firebase Cloud Messaging) ────────────────────────────────────
+  # Uncomment and fill in your Firebase credentials to enable Android push.
+  #
+  # com.nexalink.android:
+  #   type: gcm
+  #   api_key: "YOUR_FCM_SERVER_KEY_HERE"
+
+  # ── iOS (Apple Push Notification Service) ─────────────────────────────────
+  # Uncomment and fill in your APNs credentials to enable iOS push.
+  #
+  # com.nexalink.ios:
+  #   type: apns
+  #   certfile: /etc/sygnal/apns.p8
+  #   keyid: "YOUR_KEY_ID"
+  #   teamid: "YOUR_TEAM_ID"
+  #   topic: "com.nexalink.ios"
+  #   sandbox: false
