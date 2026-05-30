@@ -153,6 +153,7 @@ if [ -f "$EXISTING_ENV" ]; then
     FORM_SECRET="$(load_env_var FORM_SECRET)"
     TURN_SECRET="$(load_env_var TURN_SECRET)"
     SYNAPSE_ADMIN_TOKEN="$(load_env_var SYNAPSE_ADMIN_TOKEN)"
+    MINIO_ROOT_PASSWORD="$(load_env_var MINIO_ROOT_PASSWORD)"
 
     # Regenerate any that are missing
     [ -z "$POSTGRES_PASSWORD" ]            && POSTGRES_PASSWORD="$(gen_secret)"
@@ -161,6 +162,7 @@ if [ -f "$EXISTING_ENV" ]; then
     [ -z "$FORM_SECRET" ]                  && FORM_SECRET="$(gen_secret)"
     [ -z "$TURN_SECRET" ]                  && TURN_SECRET="$(gen_secret)"
     [ -z "$SYNAPSE_ADMIN_TOKEN" ]          && SYNAPSE_ADMIN_TOKEN="$(gen_secret)"
+    [ -z "$MINIO_ROOT_PASSWORD" ]          && MINIO_ROOT_PASSWORD="$(gen_secret)"
 
     log "Passwords loaded from existing .env."
 else
@@ -172,6 +174,7 @@ else
     FORM_SECRET="$(gen_secret)"
     TURN_SECRET="$(gen_secret)"
     SYNAPSE_ADMIN_TOKEN="$(gen_secret)"
+    MINIO_ROOT_PASSWORD="$(gen_secret)"
 
     log "Fresh secrets generated."
 fi
@@ -203,6 +206,10 @@ POSTGRES_DB=synapse
 POSTGRES_USER=synapse
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 
+# MinIO — self-hosted S3 media storage
+MINIO_ROOT_USER=nexalink
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+
 TURN_SECRET=${TURN_SECRET}
 
 # Used by cleanup.sh to purge delivered messages via Admin API
@@ -228,8 +235,9 @@ export POSTGRES_USER="synapse" POSTGRES_PASSWORD POSTGRES_DB="synapse"
 export ENABLE_REGISTRATION REGISTRATION_SHARED_SECRET
 export MACAROON_SECRET FORM_SECRET TURN_SECRET
 export TURN_PORT="3478"
+export MINIO_ROOT_USER="nexalink" MINIO_ROOT_PASSWORD
 
-TEMPLATE_VARS='${SERVER_HOST} ${SERVER_NAME} ${POSTGRES_USER} ${POSTGRES_PASSWORD} ${POSTGRES_DB} ${ENABLE_REGISTRATION} ${REGISTRATION_SHARED_SECRET} ${MACAROON_SECRET} ${FORM_SECRET} ${TURN_SECRET} ${TURN_PORT}'
+TEMPLATE_VARS='${SERVER_HOST} ${SERVER_NAME} ${POSTGRES_USER} ${POSTGRES_PASSWORD} ${POSTGRES_DB} ${ENABLE_REGISTRATION} ${REGISTRATION_SHARED_SECRET} ${MACAROON_SECRET} ${FORM_SECRET} ${TURN_SECRET} ${TURN_PORT} ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}'
 
 template_file() {
     local file="$1"
@@ -922,10 +930,36 @@ docker run --rm -v server_synapse_data:/data alpine sh -c \
     "mkdir -p /data/media_store /data/uploads /data/log && \
      chown -R 991:991 /data && chmod -R 755 /data" 2>/dev/null || true
 
+# ── Build custom Synapse image (with s3_storage_provider for MinIO) ──────────
+log "Building Synapse image with s3_storage_provider (first build may take 2-3 min)..."
+docker compose build synapse 2>&1 | tail -15 || warn "Synapse build had warnings — continuing"
+
+# ── Start MinIO (self-hosted S3 media storage) ────────────────────────────────
+log "Starting MinIO (media storage)..."
+docker compose up -d minio
+log "Waiting for MinIO to be ready..."
+MINIO_READY=false
+for i in $(seq 1 30); do
+    if docker compose exec -T minio sh -c \
+        'curl -sf http://localhost:9000/minio/health/live' 2>/dev/null; then
+        MINIO_READY=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$MINIO_READY" = "true" ]; then
+    log "Initializing MinIO bucket..."
+    docker compose run --rm minio-init 2>&1 || warn "MinIO init had warnings (bucket may already exist)"
+else
+    warn "MinIO health check timed out — bucket init skipped. Run manually:"
+    warn "  cd $SERVER_DIR && docker compose run --rm minio-init"
+fi
+
 # ── Start all infrastructure services ────────────────────────────────────────
 log "Starting infrastructure services..."
 docker compose up -d postgres redis nginx element coturn synapse-admin admin-api \
-                     prometheus grafana node-exporter media-purger
+                     sygnal prometheus grafana node-exporter postgres-exporter media-purger pgbouncer
 
 # Fix synapse volume permissions one more time (Docker Compose may recreate it)
 docker volume create server_synapse_data 2>/dev/null || true
@@ -1303,13 +1337,14 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}   NexaLink Server is running!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "  Web client:    ${CYAN}${BASE_URL}${NC}"
-echo -e "  Also via IP:   ${CYAN}https://${SERVER_HOST}${NC}"
-echo -e "  Admin panel:   ${CYAN}${BASE_URL}/admin${NC}"
-echo -e "  Config panel:  ${CYAN}${BASE_URL}/config${NC}"
-echo -e "  Grafana:       ${CYAN}${BASE_URL}/grafana/${NC} (admin / nexalink123)"
-echo -e "  Prometheus:    ${CYAN}${BASE_URL}/prometheus/${NC}"
-echo -e "  Admin user:    ${CYAN}@${ADMIN_USER}:${SERVER_HOST}${NC}"
+echo -e "  Web client:      ${CYAN}${BASE_URL}${NC}"
+echo -e "  Also via IP:     ${CYAN}https://${SERVER_HOST}${NC}"
+echo -e "  Admin panel:     ${CYAN}${BASE_URL}/admin${NC}"
+echo -e "  Config panel:    ${CYAN}${BASE_URL}/config${NC}"
+echo -e "  Grafana:         ${CYAN}${BASE_URL}/grafana/${NC} (admin / nexalink123)"
+echo -e "  Prometheus:      ${CYAN}${BASE_URL}/prometheus/${NC}"
+echo -e "  MinIO Console:   ${CYAN}${BASE_URL}/minio-console/${NC} (nexalink / ...see .env)"
+echo -e "  Admin user:      ${CYAN}@${ADMIN_USER}:${SERVER_HOST}${NC}"
 echo ""
 echo -e "  Installers:"
 echo -e "    Android:     ${CYAN}${BASE_URL}/installers/native/NexaLink-Android.apk${NC} (Native Kotlin)"

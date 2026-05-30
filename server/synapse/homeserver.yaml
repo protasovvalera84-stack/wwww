@@ -1,13 +1,12 @@
-# NexaLink Server Configuration — WhatsApp-style hybrid/relay model
-# This file is templated by setup.sh using envsubst.
-# Variables like ${VAR_NAME} are replaced during setup.
+# NexaLink Homeserver Configuration — WhatsApp-style hybrid/relay model
+# Templated by setup.sh via envsubst. Variables like ${VAR} are replaced at setup.
 #
 # RELAY MODEL:
-#   Messages live on the server for at most 1 day.
-#   Once all devices have synced, purge jobs remove the events.
+#   Messages live on the server for at most 6 hours after delivery.
 #   Clients (mobile/desktop) store a permanent local copy (IndexedDB / Room DB).
 #   The server is a relay, not a long-term store.
-#   Media is retained for 30 days to allow lazy download on new devices.
+#   Media is stored in MinIO (self-hosted S3) with a 24h lifecycle.
+#   All media blobs are AES-256 encrypted client-side before upload.
 
 server_name: "${SERVER_NAME}"
 
@@ -23,50 +22,68 @@ listeners:
       - names: [client, federation]
         compress: false
 
-# --- Database (PostgreSQL) ---
+# ── Database (through PgBouncer for connection pooling) ─────────────────────
+# At 100+ users, direct PostgreSQL connections become a bottleneck.
+# PgBouncer (transaction mode) multiplexes many Synapse connections into a
+# small pool of real database connections, dramatically reducing memory use.
 database:
   name: psycopg2
   args:
-    user: "${POSTGRES_USER}"
+    user:     "${POSTGRES_USER}"
     password: "${POSTGRES_PASSWORD}"
     database: "${POSTGRES_DB}"
-    host: postgres
-    port: 5432
-    cp_min: 5
-    cp_max: 10
+    host:     pgbouncer        # ← routes through PgBouncer, not direct to postgres
+    port:     5432
+    cp_min:   3
+    cp_max:   10
+    # PgBouncer transaction mode requires keepalives to detect stale connections
+    keepalives_idle:     10
+    keepalives_interval: 5
+    keepalives_count:    5
 
-# --- Logging ---
+# ── Logging ──────────────────────────────────────────────────────────────────
 log_config: /data/log.config
 
-# --- Media storage ---
-# WhatsApp model: media is encrypted AES-256 CLIENT-SIDE before upload.
-# The server stores only encrypted blobs — it cannot read any media content.
-# Authentication required to download (even encrypted blobs need auth).
+# ── Media storage (MinIO S3) ─────────────────────────────────────────────────
+# MinIO is a self-hosted, S3-compatible object store.
+# Media is stored encrypted (AES-256 client-side) so the server never sees
+# plaintext content. The 24h lifecycle rule in MinIO auto-deletes expired blobs.
 media_store_path: /data/media_store
 max_upload_size: 100M
-# REQUIRED: prevents unauthenticated access to media URLs
 enable_authenticated_media: true
-# Disable URL previews — server would fetch URLs and log them (privacy leak)
 url_preview_enabled: false
 
-# --- Registration ---
-enable_registration: ${ENABLE_REGISTRATION}
-enable_registration_without_verification: ${ENABLE_REGISTRATION}
-registration_shared_secret: "${REGISTRATION_SHARED_SECRET}"
-enable_set_displayname: true
-enable_set_avatar_url: true
+# S3 media backend — points to MinIO container
+media_storage_providers:
+  - module: s3_storage_provider.S3StorageProviderBackend
+    store_local: false
+    store_remote: false
+    store_synchronous: true
+    config:
+      bucket:           nexalink-media
+      endpoint_url:     http://minio:9000
+      access_key_id:    "${MINIO_ROOT_USER}"
+      secret_access_key: "${MINIO_ROOT_PASSWORD}"
+      region_name:      us-east-1
 
-# --- Room Directory ---
+# ── Registration ─────────────────────────────────────────────────────────────
+enable_registration:                    ${ENABLE_REGISTRATION}
+enable_registration_without_verification: ${ENABLE_REGISTRATION}
+registration_shared_secret:             "${REGISTRATION_SHARED_SECRET}"
+enable_set_displayname: true
+enable_set_avatar_url:  true
+
+# ── Room Directory ────────────────────────────────────────────────────────────
 allow_public_rooms_without_auth: true
 allow_public_rooms_over_federation: false
 
-# --- Security ---
+# ── Security ─────────────────────────────────────────────────────────────────
 report_stats: false
 macaroon_secret_key: "${MACAROON_SECRET}"
-form_secret: "${FORM_SECRET}"
-signing_key_path: /data/signing.key
+form_secret:         "${FORM_SECRET}"
+signing_key_path:    /data/signing.key
 
-# --- TURN server (for voice/video calls) ---
+# ── TURN server (voice/video calls via Coturn) ────────────────────────────────
 turn_uris:
   - "stun:${SERVER_HOST}:${TURN_PORT}"
   - "turn:${SERVER_HOST}:${TURN_PORT}?transport=udp"
@@ -75,10 +92,10 @@ turn_shared_secret: "${TURN_SECRET}"
 turn_user_lifetime: 86400000
 turn_allow_guests: true
 
-# --- Rate limiting (relaxed for small deployments) ---
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 rc_message:
-  per_second: 5
-  burst_count: 20
+  per_second: 10
+  burst_count: 30
 
 rc_login:
   address:
@@ -88,102 +105,112 @@ rc_login:
     per_second: 1
     burst_count: 5
 
-# --- User directory ---
+rc_registration:
+  per_second: 0.17
+  burst_count: 3
+
+rc_joins:
+  local:
+    per_second: 0.5
+    burst_count: 5
+  remote:
+    per_second: 0.1
+    burst_count: 3
+
+rc_federation:
+  window_size: 1000
+  sleep_limit: 10
+  sleep_delay: 500
+  reject_limit: 50
+  concurrent: 3
+
+# ── User directory ────────────────────────────────────────────────────────────
 user_directory:
   enabled: true
   search_all_users: true
   prefer_local_users: true
 
-# --- Presence ---
+# ── Presence ─────────────────────────────────────────────────────────────────
 presence:
   enabled: true
 
-# --- Push notifications ---
-# WhatsApp model: NEVER include message content in push payloads.
-# Push only sends a "new message" signal — the app fetches and decrypts
-# the actual content from the server using E2EE.
-# This prevents Apple/Google push servers from reading your messages.
+# ── Push notifications ───────────────────────────────────────────────────────
+# WhatsApp model: push payloads contain NO message content.
+# Only a "new message" signal is sent — the client fetches and decrypts content.
 push:
   include_content: false
+  # Sygnal push gateway (FCM + APNs)
+  push_gateway_timeout_ms: 5000
+
+# ── Sygnal push gateway ───────────────────────────────────────────────────────
+# Points to the Sygnal container. Clients register their push token here.
+# Works with no-op even if FCM/APNs keys are not configured.
 
 # ============================================================================
 # HYBRID RELAY MODEL — WhatsApp-style message lifecycle
 #
-# Policy:
-#   min_lifetime: 0s     — messages may be deleted as soon as all recipients sync
-#   max_lifetime: 1d     — hard cap: messages vanish from server after 1 day
-#
-# Purge jobs run every 6 hours to keep the server storage lean.
-# Clients must sync within 1 day to receive messages.
-# All clients use local persistence (IndexedDB / Room DB / SQLite) as
-# the permanent archive — the server only holds messages in transit.
+# min_lifetime: 0s  — messages may be deleted as soon as all recipients sync
+# max_lifetime: 6h  — hard cap: messages vanish from server after 6 hours
+# Media: 24h on MinIO (via S3 lifecycle policy)
+# Clients must sync within 6 hours; local storage is the permanent archive.
 # ============================================================================
 retention:
   enabled: true
-  # WhatsApp model: messages exist on server only until all recipients sync.
-  # min_lifetime: 0s  — may be deleted immediately after all devices sync
-  # max_lifetime: 6h  — hard cap: messages gone from server within 6 hours
-  # (WhatsApp is ~24h; 6h is more aggressive and closer to "delete after delivery")
   default_policy:
     min_lifetime: 0s
     max_lifetime: 6h
-  # Purge jobs run every hour to keep the server storage near-zero
   purge_jobs:
     - shortest_max_lifetime: 0s
       longest_max_lifetime: 6h
       interval: 1h
-    - longest_max_lifetime: 6h
-      interval: 1h
 
-# ============================================================================
-# MEDIA RETENTION — 24 hours on server (WhatsApp model)
-#
-# Media is encrypted AES-256 CLIENT-SIDE before upload.
-# Server stores only encrypted blobs.
-# Once the recipient downloads the blob, the media-purger service deletes it.
-# Hard cap: 24 hours regardless of download status.
-# ============================================================================
+# ── Media retention (MinIO lifecycle handles actual blob deletion) ────────────
 media_retention:
-  local_media_lifetime: 24h
+  local_media_lifetime:  24h
   remote_media_lifetime: 24h
 
-# --- Forgotten rooms cleanup ---
+# ── Forgotten rooms cleanup ───────────────────────────────────────────────────
 forgotten_room_retention_period: 7d
 
-# --- Stale device cleanup ---
+# ── Stale device cleanup ──────────────────────────────────────────────────────
 # Remove device records for clients that haven't synced in 30 days.
-# This ensures purge jobs aren't blocked waiting for ghost devices.
 delete_stale_devices_after: 30d
 
-# --- Trusted key servers ---
+# ── Trusted key servers ───────────────────────────────────────────────────────
 trusted_key_servers:
   - server_name: "matrix.org"
-
 suppress_key_server_warning: true
 
-# --- Metrics (Prometheus) ---
+# ── Metrics (Prometheus) ──────────────────────────────────────────────────────
 enable_metrics: true
+metrics_flags:
+  known_servers: true
 
-# --- Redis (caching + worker communication) ---
+# ── Redis (caching + worker pub/sub) ─────────────────────────────────────────
 redis:
   enabled: true
   host: redis
   port: 6379
 
-# --- Caching ---
+# ── Caching (tuned for single-server deployment) ─────────────────────────────
 caches:
-  global_factor: 1.0
+  global_factor: 1.5
   per_cache_factors:
-    get_users_in_room: 2.0
-    get_room_summary: 2.0
+    get_users_in_room:       2.0
+    get_room_summary:        2.0
     _get_state_group_for_event: 2.0
+    get_current_state_ids:   2.0
 
-# --- Performance ---
+# ── Performance ───────────────────────────────────────────────────────────────
 federation_rr_transactions_per_room_per_second: 50
 
-# --- Worker mode (optional, for scaling) ---
-# Uncomment and configure for high-load deployments.
+# ── Worker mode (future scaling) ─────────────────────────────────────────────
+# Uncomment when you need to scale beyond a single process.
+# Each worker handles a specific type of request to increase throughput.
+#
 # instance_map:
 #   main:
 #     host: synapse
 #     port: 8008
+#
+# worker_replication_secret: "${WORKER_REPLICATION_SECRET}"
